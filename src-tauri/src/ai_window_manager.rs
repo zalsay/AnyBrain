@@ -1,4 +1,7 @@
 use tauri::{AppHandle, Manager, WebviewBuilder, WebviewUrl, PhysicalPosition, PhysicalSize};
+use tauri::webview::DownloadEvent;
+use tauri_plugin_dialog::DialogExt;
+use std::sync::{Arc, Mutex};
 
 /// The height of the tab bar in logical (CSS) pixels.
 /// This is the single source of truth shared with the resize handler in lib.rs.
@@ -73,8 +76,59 @@ pub fn create_or_show_webview(
         }
 
         let platform_id_clone = platform_id.clone();
-        builder = builder.on_page_load(move |webview, payload| {
+        builder = builder.on_page_load(move |_webview, payload| {
             eprintln!("[webview] page loaded '{}' url={:?}", platform_id_clone, payload.url());
+        });
+
+        // Download handler: show native save file dialog
+        builder = builder.on_download(move |webview, event| {
+            match event {
+                DownloadEvent::Requested { url, destination } => {
+                    eprintln!("[download] requested: {}", url);
+
+                    // Extract filename from URL
+                    let url_str = url.as_str();
+                    let filename = url_str.split('/').last()
+                        .and_then(|s| s.split('?').next())
+                        .unwrap_or("download")
+                        .to_string();
+
+                    // Use a blocking approach with condvar to wait for dialog result
+                    let result: Arc<Mutex<Option<Option<std::path::PathBuf>>>> = Arc::new(Mutex::new(None));
+                    let result_clone = result.clone();
+                    let condvar = Arc::new(std::sync::Condvar::new());
+                    let condvar_clone = condvar.clone();
+
+                    webview.app_handle().dialog()
+                        .file()
+                        .set_file_name(&filename)
+                        .save_file(move |path| {
+                            let mut lock = result_clone.lock().unwrap();
+                            *lock = Some(path.map(|p| p.as_path().unwrap().to_path_buf()));
+                            condvar_clone.notify_one();
+                        });
+
+                    // Wait for the dialog to complete
+                    let mut lock = result.lock().unwrap();
+                    while lock.is_none() {
+                        lock = condvar.wait(lock).unwrap();
+                    }
+
+                    if let Some(Some(path)) = lock.take() {
+                        eprintln!("[download] saving to: {:?}", path);
+                        *destination = path;
+                        true
+                    } else {
+                        eprintln!("[download] cancelled by user");
+                        false
+                    }
+                }
+                DownloadEvent::Finished { url, path, success } => {
+                    eprintln!("[download] finished: {} -> {:?}, success: {}", url, path, success);
+                    true
+                }
+                _ => true,
+            }
         });
 
         let _webview = window
