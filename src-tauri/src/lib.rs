@@ -64,6 +64,30 @@ fn save_platforms(app: tauri::AppHandle, data: String) -> Result<(), String> {
     fs::write(&path, &data).map_err(|e| e.to_string())
 }
 
+fn settings_file_path(app: &tauri::AppHandle) -> PathBuf {
+    use tauri::Manager;
+    let dir = app.path().app_local_data_dir().unwrap();
+    dir.join("settings.json")
+}
+
+#[tauri::command]
+fn load_settings(app: tauri::AppHandle) -> Result<String, String> {
+    let path = settings_file_path(&app);
+    match fs::read_to_string(&path) {
+        Ok(data) => Ok(data),
+        Err(_) => Ok("{}".to_string()),
+    }
+}
+
+#[tauri::command]
+fn save_settings(app: tauri::AppHandle, data: String) -> Result<(), String> {
+    let path = settings_file_path(&app);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    fs::write(&path, &data).map_err(|e| e.to_string())
+}
+
 mod ai_window_manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -75,6 +99,8 @@ pub fn run() {
             greet,
             load_platforms,
             save_platforms,
+            load_settings,
+            save_settings,
             ai_window_manager::create_or_show_webview,
             ai_window_manager::destroy_webview,
             ai_window_manager::hide_all_webviews,

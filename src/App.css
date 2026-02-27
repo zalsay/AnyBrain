@@ -454,3 +454,50 @@ body {
   border-radius: 4px;
   object-fit: cover;
 }
+
+/* Settings Item Row */
+.panel-setting-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+}
+
+.panel-setting-label {
+  font-size: 14px;
+  color: var(--text-color);
+}
+
+/* iOS-style Toggle Switch */
+.toggle-switch {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
+  border: none;
+  background-color: var(--tab-bg);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background-color 0.25s ease;
+}
+
+.toggle-switch.active {
+  background-color: #34c759;
+}
+
+.toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background-color: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: transform 0.25s ease;
+}
+
+.toggle-switch.active .toggle-knob {
+  transform: translateX(20px);
+}

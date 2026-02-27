@@ -43,6 +43,7 @@ const POPULAR_PLATFORMS = [
 ];
 
 const STORAGE_KEY = 'ai-chaty-platforms';
+const SETTINGS_DEFAULTS = { useSystemProxy: true };
 
 // Try loading from Rust file first, fall back to localStorage for migration
 async function loadPlatformsAsync(): Promise<Platform[]> {
@@ -102,19 +103,27 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
   const [initialized, setInitialized] = useState(false);
+  const [useSystemProxy, setUseSystemProxy] = useState(true);
 
   // Add form state
   const [selectedPreset, setSelectedPreset] = useState<string>('');
   const [newName, setNewName] = useState('');
   const [newUrl, setNewUrl] = useState('');
 
-  // Load platforms from file on startup
+  // Load platforms and settings from file on startup
   useEffect(() => {
     loadPlatformsAsync().then(loaded => {
       setPlatforms(loaded);
       if (loaded.length > 0) setActiveTab(loaded[0].id);
       setInitialized(true);
     });
+    // Load settings
+    invoke('load_settings').then((data: unknown) => {
+      try {
+        const settings = { ...SETTINGS_DEFAULTS, ...JSON.parse(data as string) };
+        setUseSystemProxy(settings.useSystemProxy);
+      } catch { }
+    }).catch(() => { });
   }, []);
 
   // Make sure we have an active tab if platforms exist but activeTab is empty
@@ -315,66 +324,82 @@ function App() {
               </div>
             ))
           )}
-        </div>
 
-        <div className="panel-divider" />
+          {!showAddForm ? (
+            <button className="panel-add-btn" onClick={() => setShowAddForm(true)}>
+              <Plus size={16} />
+              <span>添加新标签</span>
+            </button>
+          ) : (
+            <div className="add-form">
+              <div className="select-container">
+                <select
+                  className="add-select"
+                  value={selectedPreset}
+                  onChange={handlePresetSelect}
+                >
+                  <option value="" disabled>选择 AI 平台</option>
+                  {POPULAR_PLATFORMS.map((p, i) => (
+                    <option key={i} value={i}>{p.name}</option>
+                  ))}
+                  <option value="custom">自定义...</option>
+                </select>
+                <ChevronDown className="select-icon" size={16} />
+              </div>
 
-        {!showAddForm ? (
-          <button className="panel-add-btn" onClick={() => setShowAddForm(true)}>
-            <Plus size={16} />
-            <span>添加新标签</span>
-          </button>
-        ) : (
-          <div className="add-form">
-            <div className="select-container">
-              <select
-                className="add-select"
-                value={selectedPreset}
-                onChange={handlePresetSelect}
-              >
-                <option value="" disabled>选择 AI 平台</option>
-                {POPULAR_PLATFORMS.map((p, i) => (
-                  <option key={i} value={i}>{p.name}</option>
-                ))}
-                <option value="custom">自定义...</option>
-              </select>
-              <ChevronDown className="select-icon" size={16} />
+              {selectedPreset === 'custom' && (
+                <>
+                  <input
+                    className="add-input"
+                    placeholder="名称（如 DeepSeek）"
+                    value={newName}
+                    onChange={e => setNewName(e.target.value)}
+                    autoFocus
+                  />
+                  <input
+                    className="add-input"
+                    placeholder="网址（如 https://chat.deepseek.com）"
+                    value={newUrl}
+                    onChange={e => setNewUrl(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleAddPlatform()}
+                  />
+                </>
+              )}
+
+              <div className="add-form-actions">
+                <button className="add-form-cancel" onClick={() => {
+                  setShowAddForm(false);
+                  resetAddForm();
+                }}>取消</button>
+                <button
+                  className="add-form-confirm"
+                  onClick={handleAddPlatform}
+                  disabled={!newName.trim() || !newUrl.trim()}
+                >
+                  添加
+                </button>
+              </div>
             </div>
+          )}
 
-            {selectedPreset === 'custom' && (
-              <>
-                <input
-                  className="add-input"
-                  placeholder="名称（如 DeepSeek）"
-                  value={newName}
-                  onChange={e => setNewName(e.target.value)}
-                  autoFocus
-                />
-                <input
-                  className="add-input"
-                  placeholder="网址（如 https://chat.deepseek.com）"
-                  value={newUrl}
-                  onChange={e => setNewUrl(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleAddPlatform()}
-                />
-              </>
-            )}
+          <div className="panel-divider" />
 
-            <div className="add-form-actions">
-              <button className="add-form-cancel" onClick={() => {
-                setShowAddForm(false);
-                resetAddForm();
-              }}>取消</button>
-              <button
-                className="add-form-confirm"
-                onClick={handleAddPlatform}
-                disabled={!newName.trim() || !newUrl.trim()}
-              >
-                添加
-              </button>
-            </div>
+          <div className="panel-setting-item">
+            <span className="panel-setting-label">使用系统代理</span>
+            <button
+              className={`toggle-switch ${useSystemProxy ? 'active' : ''}`}
+              onClick={() => {
+                const newVal = !useSystemProxy;
+                setUseSystemProxy(newVal);
+                invoke('save_settings', { data: JSON.stringify({ useSystemProxy: newVal }) }).catch(console.error);
+              }}
+              role="switch"
+              aria-checked={useSystemProxy}
+            >
+              <span className="toggle-knob" />
+            </button>
           </div>
-        )}
+        </div>
       </div>
     </div>
   );
