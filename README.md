@@ -1,6 +1,6 @@
-# AnyBrain
+# Brainer
 
-AnyBrain is a powerful desktop AI workspace manager that allows you to manage and interact with multiple AI platforms in one place.
+Brainer is a powerful desktop AI workspace manager that allows you to manage and interact with multiple AI platforms in one place.
 
 ## Features
 

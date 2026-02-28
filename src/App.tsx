@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Plus, Trash2, X, ChevronDown, ChevronUp, Globe, RefreshCw } from 'lucide-react';
 import './App.css';
-import appLogo from './assets/logo.png';
+import appLogo from '../src-tauri/icons/128x128.png';
 
 // Preload all SVG/PNG icons from the assets folder using Vite
 const iconModules = import.meta.glob('/src/assets/icons/*.{svg,png}', { eager: true, query: '?url', import: 'default' }) as Record<string, string>;
@@ -157,7 +157,11 @@ function App() {
   useEffect(() => {
     loadPlatformsAsync().then(loaded => {
       setPlatforms(loaded);
-      if (loaded.length > 0) setActiveTab(loaded[0].id);
+      if (loaded.length > 0) {
+        setActiveTab(loaded[0].id);
+      } else {
+        setShowSettings(true);
+      }
       setInitialized(true);
     });
     // Load settings
@@ -358,7 +362,7 @@ function App() {
       <div className="titlebar">
         <div className="tabs-container">
           <button className="icon-button settings-logo-btn" onClick={toggleSettings} aria-label="设置">
-            <img src={appLogo} alt="AnyBrain Logo" className="app-logo-small" />
+            <img src={appLogo} alt="Brainer Logo" className="app-logo-small" />
           </button>
           {platforms.filter(p => !p.hidden).map((platform) => (
             <div

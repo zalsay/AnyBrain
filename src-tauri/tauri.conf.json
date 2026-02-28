@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AnyBrain",
+  "productName": "Brainer",
   "version": "0.1.0",
-  "identifier": "com.yingzhang.anybrain",
+  "identifier": "com.yingzhang.brainer",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "AnyBrain",
+        "title": "Brainer",
         "width": 1024,
         "height": 1300
       }

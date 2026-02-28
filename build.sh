@@ -14,3 +14,4 @@ echo "Building Tauri release..."
 npm run tauri build
 
 echo "Build complete! You can find the release artifacts in src-tauri/target/release/bundle/"
+open src-tauri/target/release/bundle/dmg
