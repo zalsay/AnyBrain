@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Settings, Plus, Trash2, X, ChevronDown, ChevronUp, Globe, RefreshCw } from 'lucide-react';
+import { Plus, Trash2, X, ChevronDown, ChevronUp, Globe, RefreshCw } from 'lucide-react';
 import './App.css';
+import appLogo from './assets/logo.png';
 
 // Preload all SVG/PNG icons from the assets folder using Vite
 const iconModules = import.meta.glob('/src/assets/icons/*.{svg,png}', { eager: true, query: '?url', import: 'default' }) as Record<string, string>;
@@ -29,6 +30,7 @@ interface Platform {
   id: string;
   name: string;
   url: string;
+  hidden?: boolean;
 }
 
 const POPULAR_PLATFORMS = [
@@ -91,13 +93,31 @@ function deriveNameFromUrl(value: string) {
 }
 
 
-// Component to render platform favicon from local assets with fallback
-function PlatformIcon({ platformId, platformName, size = 16 }: { platformId: string; platformName: string; size?: number }) {
+// Component to render platform favicon from local assets with fallback to website favicon
+function PlatformIcon({ platformId, platformName, url, size = 16 }: { platformId: string; platformName: string; url?: string; size?: number }) {
   const [error, setError] = useState(false);
   const iconUrl = getIconUrl(platformId, platformName);
 
-  // If no matching SVG was found, or if loading failed, show globe fallback
+  // If no matching local SVG/PNG was found, or if local loading failed, try fetching website favicon
   if (!iconUrl || error) {
+    if (url) {
+      try {
+        const domain = new URL(url).hostname;
+        const faviconUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=${size * 2}`;
+        return (
+          <img
+            src={faviconUrl}
+            alt="favicon"
+            width={size}
+            height={size}
+            className="platform-icon"
+            onError={() => setError(true)} // If favicon also fails, it will hit error state again
+          />
+        );
+      } catch {
+        // Fallback to globe if URL is invalid
+      }
+    }
     return <Globe size={size} />;
   }
 
@@ -108,7 +128,10 @@ function PlatformIcon({ platformId, platformName, size = 16 }: { platformId: str
       width={size}
       height={size}
       className="platform-icon"
-      onError={() => setError(true)}
+      onError={() => {
+        // If local icon fails to load, the component will re-render and try the favicon/globe logic
+        setError(true);
+      }}
     />
   );
 }
@@ -148,8 +171,9 @@ function App() {
 
   // Make sure we have an active tab if platforms exist but activeTab is empty
   useEffect(() => {
-    const all = [...platforms, ...tempTabs];
-    if (all.length > 0 && !activeTab) {
+    const visiblePlatforms = platforms.filter(p => !p.hidden);
+    const all = [...visiblePlatforms, ...tempTabs];
+    if (all.length > 0 && (!activeTab || (platforms.find(p => p.id === activeTab)?.hidden))) {
       setActiveTab(all[0].id);
     }
   }, [platforms, tempTabs, activeTab]);
@@ -174,7 +198,7 @@ function App() {
       invoke('create_or_show_webview', {
         platformId: platform.id,
         url: platform.url,
-        topOffset: 78.0
+        topOffset: 70.0
       }).catch(console.error);
     }
   }, [activeTab, platforms, tempTabs, showSettings]);
@@ -195,7 +219,7 @@ function App() {
       return unlisten;
     })();
     return () => {
-      unlistenPromise.then(u => { try { u(); } catch {} });
+      unlistenPromise.then(u => { try { u(); } catch { } });
     };
   }, []);
 
@@ -210,7 +234,7 @@ function App() {
       setShowSettings(false);
       setShowAddForm(false);
       resetAddForm();
-      const platform = platforms.find(p => p.id === activeTab);
+      const platform = platforms.find(p => p.id === activeTab && !p.hidden);
       if (platform) {
         invoke('create_or_show_webview', {
           platformId: platform.id,
@@ -317,17 +341,26 @@ function App() {
       setTempTabs(tempAfter);
       return;
     }
-    if (activeTab === id) {
-      const combined = [...platforms, ...tempTabs].filter(p => p.id !== id);
-      setActiveTab(combined.length ? combined[0].id : '');
-    }
+    // For fixed platforms, we just hide them
+    setPlatforms(prev => {
+      const updated = prev.map(p => p.id === id ? { ...p, hidden: true } : p);
+      if (activeTab === id) {
+        const visibleAfter = updated.filter(p => !p.hidden);
+        const combined = [...visibleAfter, ...tempTabs];
+        setActiveTab(combined.length ? combined[0].id : '');
+      }
+      return updated;
+    });
   };
 
   return (
     <div className="app-container">
       <div className="titlebar">
         <div className="tabs-container">
-          {platforms.map((platform) => (
+          <button className="icon-button settings-logo-btn" onClick={toggleSettings} aria-label="设置">
+            <img src={appLogo} alt="AnyBrain Logo" className="app-logo-small" />
+          </button>
+          {platforms.filter(p => !p.hidden).map((platform) => (
             <div
               key={platform.id}
               className={`tab-button ${activeTab === platform.id ? 'active' : ''}`}
@@ -343,7 +376,7 @@ function App() {
                   <RefreshCw size={14} />
                 </button>
               )}
-              <PlatformIcon platformId={platform.id} platformName={platform.name} size={16} />
+              <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={16} />
               <span>{platform.name}</span>
               <button
                 className="tab-close-btn"
@@ -355,7 +388,7 @@ function App() {
               </button>
             </div>
           ))}
-          {platforms.length > 0 && tempTabs.length > 0 && (
+          {platforms.filter(p => !p.hidden).length > 0 && tempTabs.length > 0 && (
             <div className="tab-divider" aria-hidden="true" />
           )}
           {tempTabs.map((platform) => (
@@ -374,7 +407,7 @@ function App() {
                   <RefreshCw size={14} />
                 </button>
               )}
-              <PlatformIcon platformId={platform.id} platformName={platform.name} size={16} />
+              <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={16} />
               <span>{platform.name}</span>
               <button
                 className="tab-close-btn"
@@ -386,7 +419,7 @@ function App() {
               </button>
             </div>
           ))}
-          {platforms.length === 0 && tempTabs.length === 0 && (
+          {platforms.filter(p => !p.hidden).length === 0 && tempTabs.length === 0 && (
             <div className="empty-tabs-msg">点击设置添加平台</div>
           )}
           <div className="tab-add-wrapper">
@@ -427,7 +460,21 @@ function App() {
                   onBlur={() => {
                     if (quickUrl.trim()) setQuickUrl(normalizeUrl(quickUrl));
                   }}
-                  onKeyDown={e => e.key === 'Enter' && handleQuickAdd()}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      const currentTemp = tempTabs.find(p => p.id === activeTab);
+                      if (currentTemp && (!currentTemp.url || !currentTemp.url.trim())) {
+                        const finalUrl = normalizeUrl(quickUrl);
+                        if (!finalUrl) return;
+                        const displayName = quickName.trim() || deriveNameFromUrl(finalUrl);
+                        setTempTabs(prev => prev.map(p => p.id === currentTemp.id ? ({ ...p, name: displayName, url: finalUrl }) : p));
+                        setShowQuickAdd(false);
+                        resetQuickAdd();
+                        return;
+                      }
+                      handleQuickAdd();
+                    }
+                  }}
                   autoFocus
                 />
                 <div className="tab-add-actions">
@@ -475,9 +522,7 @@ function App() {
         </div>
 
         <div className="titlebar-actions">
-          <button className="icon-button" onClick={toggleSettings} aria-label="设置">
-            <Settings size={18} />
-          </button>
+          {/* Settings button moved to the left */}
         </div>
       </div>
 
@@ -513,12 +558,24 @@ function App() {
             <div className="empty-panel-msg">暂无标签页</div>
           ) : (
             platforms.map((p, index) => (
-              <div key={p.id} className="panel-item">
+              <div
+                key={p.id}
+                className={`panel-item ${p.hidden ? 'is-hidden' : ''}`}
+                onClick={() => {
+                  if (p.hidden) {
+                    setPlatforms(prev => prev.map(item => item.id === p.id ? { ...item, hidden: false } : item));
+                    setActiveTab(p.id);
+                  }
+                }}
+                style={{ cursor: p.hidden ? 'pointer' : 'default' }}
+                title={p.hidden ? '点击重新显示并打开' : ''}
+              >
                 <div className="panel-item-info">
-                  <PlatformIcon platformId={p.id} platformName={p.name} size={16} />
+                  <PlatformIcon platformId={p.id} platformName={p.name} url={p.url} size={16} />
                   <span className="panel-item-name">{p.name}</span>
+                  {p.hidden && <span className="panel-hidden-badge">已收起</span>}
                 </div>
-                <div className="panel-item-actions">
+                <div className="panel-item-actions" onClick={e => e.stopPropagation()}>
                   <button
                     className="panel-item-action-btn"
                     onClick={() => handleMovePlatform(index, 'up')}

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 /// The height of the tab bar in logical (CSS) pixels.
 /// This is the single source of truth shared with the resize handler in lib.rs.
-pub const TAB_BAR_LOGICAL_HEIGHT: f64 = 76.0;
+pub const TAB_BAR_LOGICAL_HEIGHT: f64 = 70.0;
 
 /// Compute the child webview's physical bounds based on the main window's current size.
 fn compute_child_bounds(window: &tauri::Window) -> (PhysicalPosition<i32>, PhysicalSize<u32>) {

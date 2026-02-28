@@ -8,7 +8,7 @@
   --text-color: #e5e5e5;
   --text-muted: #a0a0a0;
   --border-color: #000000;
-  --titlebar-height: 48px;
+  --titlebar-height: 40px;
 }
 
 @media (prefers-color-scheme: light) {
@@ -40,7 +40,6 @@ body {
   height: 100vh;
   width: 100vw;
   background-color: var(--bg-color);
-  border-radius: 12px;
   overflow: hidden;
   box-sizing: border-box;
   /* Optional: border can help define the rounded edges on some transparent backgrounds */
@@ -53,7 +52,7 @@ body {
   background-color: var(--bg-color);
   display: flex;
   align-items: center;
-  padding: 0 12px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--border-color);
   box-sizing: border-box;
   cursor: default;
@@ -97,10 +96,10 @@ body {
 
 .tabs-container {
   display: flex;
-  gap: 8px;
+  gap: 4px;
   height: 100%;
   align-items: flex-end;
-  padding-left: 8px;
+  padding-left: 2px;
   flex: 1;
 }
 
@@ -243,9 +242,9 @@ body {
 .tab-button {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   height: 36px;
-  padding: 0 16px;
+  padding: 0 6px;
   background-color: var(--tab-bg);
   border: none;
   border-radius: 8px 8px 0 0;
@@ -317,6 +316,7 @@ body {
   color: var(--text-color);
   background-color: var(--tab-hover-bg);
 }
+
 .titlebar-actions {
   display: flex;
   align-items: center;
@@ -341,13 +341,29 @@ body {
   color: var(--text-color);
 }
 
+.settings-logo-btn {
+  padding: 4px;
+  margin-right: 4px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.app-logo-small {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  object-fit: contain;
+}
+
 /* Settings Backdrop */
 .settings-backdrop {
   position: fixed;
-  top: 0;
+  top: 48px;
   left: 0;
   width: 100vw;
-  height: 100vh;
+  height: calc(100vh - 48px);
   background-color: rgba(0, 0, 0, 0);
   z-index: 900;
   pointer-events: none;
@@ -362,18 +378,19 @@ body {
 /* Settings Slide-in Panel */
 .settings-panel {
   position: fixed;
-  top: 0;
-  right: 0;
+  top: 40px;
+  left: 0;
   width: 320px;
-  height: 100vh;
+  height: calc(100vh - 40px);
   background-color: var(--bg-color);
-  border-left: 1px solid var(--border-color);
+  border-right: 1px solid var(--border-color);
+  border-top: 1px solid var(--border-color);
   z-index: 1000;
-  transform: translateX(100%);
+  transform: translateX(-100%);
   transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   display: flex;
   flex-direction: column;
-  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.2);
+  box-shadow: 4px 0 20px rgba(0, 0, 0, 0.2);
 }
 
 .settings-panel.open {
@@ -424,6 +441,25 @@ body {
 .panel-item-name {
   font-size: 14px;
   color: var(--text-color);
+}
+
+.is-hidden {
+  opacity: 0.6;
+}
+
+.is-hidden:hover {
+  opacity: 1;
+  background-color: var(--tab-hover-bg);
+}
+
+.panel-hidden-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  background-color: var(--tab-bg);
+  color: var(--text-muted);
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  margin-left: 4px;
 }
 
 .panel-item-actions {
