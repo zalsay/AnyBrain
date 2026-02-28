@@ -423,9 +423,7 @@ function App() {
               </button>
             </div>
           ))}
-          {platforms.filter(p => !p.hidden).length === 0 && tempTabs.length === 0 && (
-            <div className="empty-tabs-msg">点击设置添加平台</div>
-          )}
+
           <div className="tab-add-wrapper">
             <button
               className="tab-add-button"
