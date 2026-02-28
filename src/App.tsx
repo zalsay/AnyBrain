@@ -74,6 +74,22 @@ function savePlatformsToFile(platforms: Platform[]) {
   localStorage.setItem(STORAGE_KEY, data);
 }
 
+function normalizeUrl(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+
+function deriveNameFromUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.hostname.replace(/^www\./, '') || '新标签';
+  } catch {
+    return '新标签';
+  }
+}
+
 
 // Component to render platform favicon from local assets with fallback
 function PlatformIcon({ platformId, platformName, size = 16 }: { platformId: string; platformName: string; size?: number }) {
@@ -99,16 +115,20 @@ function PlatformIcon({ platformId, platformName, size = 16 }: { platformId: str
 
 function App() {
   const [platforms, setPlatforms] = useState<Platform[]>([]);
+  const [tempTabs, setTempTabs] = useState<Platform[]>([]);
   const [activeTab, setActiveTab] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
   const [initialized, setInitialized] = useState(false);
   const [useSystemProxy, setUseSystemProxy] = useState(true);
+  const [showQuickAdd, setShowQuickAdd] = useState(false);
 
   // Add form state
   const [selectedPreset, setSelectedPreset] = useState<string>('');
   const [newName, setNewName] = useState('');
   const [newUrl, setNewUrl] = useState('');
+  const [quickName, setQuickName] = useState('');
+  const [quickUrl, setQuickUrl] = useState('');
 
   // Load platforms and settings from file on startup
   useEffect(() => {
@@ -128,10 +148,11 @@ function App() {
 
   // Make sure we have an active tab if platforms exist but activeTab is empty
   useEffect(() => {
-    if (platforms.length > 0 && !activeTab) {
-      setActiveTab(platforms[0].id);
+    const all = [...platforms, ...tempTabs];
+    if (all.length > 0 && !activeTab) {
+      setActiveTab(all[0].id);
     }
-  }, [platforms, activeTab]);
+  }, [platforms, tempTabs, activeTab]);
 
   // Save platforms whenever they change (skip initial empty state)
   useEffect(() => {
@@ -143,7 +164,12 @@ function App() {
   // Create or show webview when active tab changes (only if settings is closed)
   useEffect(() => {
     if (showSettings || !activeTab) return;
-    const platform = platforms.find(p => p.id === activeTab);
+    const platform = tempTabs.find(p => p.id === activeTab) || platforms.find(p => p.id === activeTab);
+    if (!platform) return;
+    if (!platform.url || !platform.url.trim()) {
+      invoke('hide_all_webviews').catch(console.error);
+      return;
+    }
     if (platform) {
       invoke('create_or_show_webview', {
         platformId: platform.id,
@@ -151,13 +177,34 @@ function App() {
         topOffset: 78.0
       }).catch(console.error);
     }
-  }, [activeTab, platforms, showSettings]);
+  }, [activeTab, platforms, tempTabs, showSettings]);
+
+  // 监听来自子 WebView 的新窗口请求，转为应用内新建临时标签
+  useEffect(() => {
+    const unlistenPromise = (async () => {
+      // @ts-ignore: dynamic import for event APIs
+      const { listen } = await import('@tauri-apps/api/event');
+      const unlisten = await listen<string>('new_tab_request', (event) => {
+        const url = event.payload || '';
+        if (!url) return;
+        const id = `tmp-${Date.now()}`;
+        const name = deriveNameFromUrl(url);
+        setTempTabs(prev => [...prev, { id, name, url }]);
+        setActiveTab(id);
+      });
+      return unlisten;
+    })();
+    return () => {
+      unlistenPromise.then(u => { try { u(); } catch {} });
+    };
+  }, []);
 
   const toggleSettings = () => {
     if (!showSettings) {
       // Opening settings: hide all child webviews so the panel is visible
       invoke('hide_all_webviews').catch(console.error);
       setShowSettings(true);
+      setShowQuickAdd(false);
     } else {
       // Closing settings: re-show the active webview
       setShowSettings(false);
@@ -178,6 +225,11 @@ function App() {
     setSelectedPreset('');
     setNewName('');
     setNewUrl('');
+  };
+
+  const resetQuickAdd = () => {
+    setQuickName('');
+    setQuickUrl('');
   };
 
   const handlePresetSelect = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -201,15 +253,26 @@ function App() {
     const id = newName.toLowerCase().replace(/\s+/g, '-') + '-' + Date.now();
 
     // Ensure URL has protocol
-    let finalUrl = newUrl.trim();
-    if (!finalUrl.startsWith('http://') && !finalUrl.startsWith('https://')) {
-      finalUrl = 'https://' + finalUrl;
-    }
+    const finalUrl = normalizeUrl(newUrl);
 
     const newPlatform: Platform = { id, name: newName.trim(), url: finalUrl };
     setPlatforms(prev => [...prev, newPlatform]);
     setShowAddForm(false);
     resetAddForm();
+    setActiveTab(id);
+  };
+
+  const handleQuickAdd = () => {
+    if (!quickUrl.trim()) return;
+    const finalUrl = normalizeUrl(quickUrl);
+    const displayName = quickName.trim() || deriveNameFromUrl(finalUrl);
+    const baseId = (quickName.trim() || displayName).toLowerCase().replace(/\s+/g, '-') || 'tmp';
+    const id = `tmp-${baseId}-${Date.now()}`;
+
+    const newPlatform: Platform = { id, name: displayName, url: finalUrl };
+    setTempTabs(prev => [...prev, newPlatform]);
+    setShowQuickAdd(false);
+    resetQuickAdd();
     setActiveTab(id);
   };
 
@@ -241,6 +304,25 @@ function App() {
     invoke('reload_webview', { platformId: id }).catch(console.error);
   };
 
+  const handleCloseTab = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    invoke('destroy_webview', { platformId: id }).catch(console.error);
+    const isTemp = tempTabs.some(p => p.id === id);
+    if (isTemp) {
+      const tempAfter = tempTabs.filter(p => p.id !== id);
+      if (activeTab === id) {
+        const combined = [...platforms, ...tempAfter];
+        setActiveTab(combined.length ? combined[0].id : '');
+      }
+      setTempTabs(tempAfter);
+      return;
+    }
+    if (activeTab === id) {
+      const combined = [...platforms, ...tempTabs].filter(p => p.id !== id);
+      setActiveTab(combined.length ? combined[0].id : '');
+    }
+  };
+
   return (
     <div className="app-container">
       <div className="titlebar">
@@ -251,30 +333,164 @@ function App() {
               className={`tab-button ${activeTab === platform.id ? 'active' : ''}`}
               onClick={() => setActiveTab(platform.id)}
             >
-              <PlatformIcon platformId={platform.id} platformName={platform.name} size={16} />
-              <span>{platform.name}</span>
               {activeTab === platform.id && (
                 <button
-                  className="tab-refresh-btn"
+                  className="tab-refresh-btn tab-refresh-left"
                   onClick={(e) => handleReloadPlatform(e, platform.id)}
                   title="刷新"
+                  aria-label="刷新当前标签"
                 >
                   <RefreshCw size={14} />
                 </button>
               )}
+              <PlatformIcon platformId={platform.id} platformName={platform.name} size={16} />
+              <span>{platform.name}</span>
+              <button
+                className="tab-close-btn"
+                onClick={(e) => handleCloseTab(e, platform.id)}
+                title="关闭"
+                aria-label="关闭标签"
+              >
+                <X size={12} />
+              </button>
             </div>
           ))}
-          {platforms.length === 0 && (
+          {platforms.length > 0 && tempTabs.length > 0 && (
+            <div className="tab-divider" aria-hidden="true" />
+          )}
+          {tempTabs.map((platform) => (
+            <div
+              key={platform.id}
+              className={`tab-button ${activeTab === platform.id ? 'active' : ''}`}
+              onClick={() => setActiveTab(platform.id)}
+            >
+              {activeTab === platform.id && (
+                <button
+                  className="tab-refresh-btn tab-refresh-left"
+                  onClick={(e) => handleReloadPlatform(e, platform.id)}
+                  title="刷新"
+                  aria-label="刷新当前标签"
+                >
+                  <RefreshCw size={14} />
+                </button>
+              )}
+              <PlatformIcon platformId={platform.id} platformName={platform.name} size={16} />
+              <span>{platform.name}</span>
+              <button
+                className="tab-close-btn"
+                onClick={(e) => handleCloseTab(e, platform.id)}
+                title="关闭"
+                aria-label="关闭标签"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+          {platforms.length === 0 && tempTabs.length === 0 && (
             <div className="empty-tabs-msg">点击设置添加平台</div>
           )}
+          <div className="tab-add-wrapper">
+            <button
+              className="tab-add-button"
+              onClick={() => {
+                if (showSettings) return;
+                if (!showQuickAdd) {
+                  const id = `tmp-new-${Date.now()}`;
+                  setTempTabs(prev => [...prev, { id, name: '新标签', url: '' }]);
+                  setActiveTab(id);
+                }
+                setShowQuickAdd(true);
+              }}
+              aria-label="新增标签"
+              title="新增标签"
+              disabled={showSettings}
+            >
+              <Plus size={16} />
+            </button>
+            {showQuickAdd && (
+              <div className="tab-add-popover">
+                <div className="tab-add-title">新增标签</div>
+                <input
+                  className="tab-add-input"
+                  placeholder="名称（可选）"
+                  value={quickName}
+                  onChange={e => setQuickName(e.target.value)}
+                />
+                <input
+                  className="tab-add-input"
+                  placeholder="网址（如 https://chat.deepseek.com）"
+                  value={quickUrl}
+                  onChange={e => setQuickUrl(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleQuickAdd()}
+                  autoFocus
+                />
+                <div className="tab-add-actions">
+                  <button
+                    className="tab-add-cancel"
+                    onClick={() => {
+                      setShowQuickAdd(false);
+                      resetQuickAdd();
+                      const currentTemp = tempTabs.find(p => p.id === activeTab);
+                      if (currentTemp && (!currentTemp.url || !currentTemp.url.trim())) {
+                        setTempTabs(prev => {
+                          const updated = prev.filter(p => p.id !== activeTab);
+                          const next = [...platforms, ...updated];
+                          setActiveTab(next.length ? next[0].id : '');
+                          return updated;
+                        });
+                      }
+                    }}
+                  >
+                    取消
+                  </button>
+                  <button
+                    className="tab-add-confirm"
+                    onClick={() => {
+                      const currentTemp = tempTabs.find(p => p.id === activeTab);
+                      if (currentTemp && (!currentTemp.url || !currentTemp.url.trim())) {
+                        const finalUrl = normalizeUrl(quickUrl);
+                        if (!finalUrl) return;
+                        const displayName = quickName.trim() || deriveNameFromUrl(finalUrl);
+                        setTempTabs(prev => prev.map(p => p.id === currentTemp.id ? ({ ...p, name: displayName, url: finalUrl }) : p));
+                        setShowQuickAdd(false);
+                        resetQuickAdd();
+                        return;
+                      }
+                      handleQuickAdd();
+                    }}
+                    disabled={!quickUrl.trim()}
+                  >
+                    打开
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="titlebar-actions">
-          <button className="icon-button" onClick={toggleSettings}>
+          <button className="icon-button" onClick={toggleSettings} aria-label="设置">
             <Settings size={18} />
           </button>
         </div>
       </div>
+
+      <div
+        className={`tab-add-backdrop ${showQuickAdd ? 'open' : ''}`}
+        onClick={() => {
+          setShowQuickAdd(false);
+          resetQuickAdd();
+          const currentTemp = tempTabs.find(p => p.id === activeTab);
+          if (currentTemp && (!currentTemp.url || !currentTemp.url.trim())) {
+            setTempTabs(prev => {
+              const updated = prev.filter(p => p.id !== activeTab);
+              const next = [...platforms, ...updated];
+              setActiveTab(next.length ? next[0].id : '');
+              return updated;
+            });
+          }
+        }}
+      />
 
       {/* Settings Slide-in Panel + Backdrop */}
       <div className={`settings-backdrop ${showSettings ? 'open' : ''}`} onClick={toggleSettings} />
@@ -342,7 +558,7 @@ function App() {
                   {POPULAR_PLATFORMS.map((p, i) => (
                     <option key={i} value={i}>{p.name}</option>
                   ))}
-                  <option value="custom">自定义...</option>
+                  <option value="custom">自定义标签页</option>
                 </select>
                 <ChevronDown className="select-icon" size={16} />
               </div>

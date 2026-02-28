@@ -104,6 +104,142 @@ body {
   flex: 1;
 }
 
+.tab-add-wrapper {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  height: 100%;
+}
+
+.tab-add-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px 8px 0 0;
+  border: 1px solid var(--border-color);
+  box-sizing: border-box;
+  background-color: var(--tab-bg);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tab-add-button:hover {
+  background-color: var(--tab-hover-bg);
+  color: var(--text-color);
+}
+
+.tab-add-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tab-add-button:disabled:hover {
+  background-color: var(--tab-bg);
+  color: var(--text-muted);
+}
+
+.tab-add-popover {
+  position: absolute;
+  top: 44px;
+  right: 0;
+  width: 260px;
+  padding: 12px;
+  background-color: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 960;
+}
+
+.tab-add-title {
+  font-size: 13px;
+  color: var(--text-color);
+  font-weight: 600;
+}
+
+.tab-add-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background-color: var(--tab-bg);
+  color: var(--text-color);
+  font-size: 12px;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease;
+}
+
+.tab-add-input:focus {
+  border-color: #5b9bd5;
+}
+
+.tab-add-input::placeholder {
+  color: var(--text-muted);
+}
+
+.tab-add-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.tab-add-cancel,
+.tab-add-confirm {
+  border: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tab-add-cancel {
+  background-color: transparent;
+  color: var(--text-muted);
+}
+
+.tab-add-cancel:hover {
+  color: var(--text-color);
+  background-color: var(--tab-hover-bg);
+}
+
+.tab-add-confirm {
+  background-color: #3b82f6;
+  color: white;
+}
+
+.tab-add-confirm:hover {
+  background-color: #2563eb;
+}
+
+.tab-add-confirm:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.tab-add-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background-color: rgba(0, 0, 0, 0);
+  z-index: 950;
+  pointer-events: none;
+}
+
+.tab-add-backdrop.open {
+  pointer-events: all;
+}
+
 .tab-button {
   display: flex;
   align-items: center;
@@ -137,8 +273,7 @@ body {
   border: none;
   color: var(--text-muted);
   padding: 4px;
-  margin-left: 2px;
-  margin-right: -8px;
+  margin: 0 6px 0 0;
   border-radius: 4px;
   display: flex;
   align-items: center;
@@ -147,11 +282,41 @@ body {
   transition: all 0.2s ease;
 }
 
+.tab-refresh-left {
+  margin-right: 8px;
+}
+
 .tab-refresh-btn:hover {
   color: var(--text-color);
   background-color: var(--tab-hover-bg);
 }
 
+.tab-divider {
+  align-self: stretch;
+  width: 1px;
+  background-color: var(--tab-active-bg);
+  margin: 0 4px;
+  opacity: 1;
+}
+
+.tab-close-btn {
+  margin-left: 8px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: 4px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tab-close-btn:hover {
+  color: var(--text-color);
+  background-color: var(--tab-hover-bg);
+}
 .titlebar-actions {
   display: flex;
   align-items: center;

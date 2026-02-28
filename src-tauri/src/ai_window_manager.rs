@@ -1,5 +1,6 @@
-use tauri::{AppHandle, Manager, WebviewBuilder, WebviewUrl, PhysicalPosition, PhysicalSize};
-use tauri::webview::DownloadEvent;
+use tauri::{AppHandle, Manager, WebviewBuilder, WebviewUrl, PhysicalPosition, PhysicalSize, Emitter};
+use url::Url;
+use tauri::webview::{DownloadEvent, PageLoadEvent, NewWindowResponse};
 use std::path::PathBuf;
 
 /// The height of the tab bar in logical (CSS) pixels.
@@ -76,9 +77,24 @@ pub fn create_or_show_webview(
         eprintln!("[webview] re-shown '{}'", platform_id);
     } else {
         // Create a new child webview with isolated data directory
-        let data_dir = app.path().app_local_data_dir().unwrap().join(&platform_id);
-
-        let mut builder = WebviewBuilder::new(&platform_id, WebviewUrl::External(url.parse().unwrap()))
+        let normalized_url = if url.starts_with("http://") || url.starts_with("https://") {
+            url.clone()
+        } else {
+            format!("https://{}", url)
+        };
+        // 临时标签按 URL 主机名复用 user-data；固定标签按平台 id 隔离
+        let host_key = match Url::parse(&normalized_url) {
+            Ok(u) => u.host_str().unwrap_or("tmp").to_string(),
+            Err(_) => "tmp".to_string(),
+        };
+        let store_key = if platform_id.starts_with("tmp-") {
+            format!("url-{}", host_key)
+        } else {
+            platform_id.clone()
+        };
+        let data_dir = app.path().app_local_data_dir().unwrap().join("webdata").join(&store_key);
+        let parsed_url = normalized_url.parse().map_err(|e| format!("Invalid URL '{}': {}", url, e))?;
+        let mut builder = WebviewBuilder::new(&platform_id, WebviewUrl::External(parsed_url))
             .data_directory(data_dir);
             
         #[cfg(target_os = "macos")]
@@ -86,7 +102,7 @@ pub fn create_or_show_webview(
             // Set data_store_identifier for macOS 14+ to ensure cookies/localStorage isolation
             // It requires exactly [u8; 16] and should be a valid UUID.
             let mut id = [0u8; 16];
-            let bytes = platform_id.as_bytes();
+            let bytes = store_key.as_bytes();
             let len = bytes.len().min(16);
             id[..len].copy_from_slice(&bytes[..len]);
             
@@ -98,8 +114,36 @@ pub fn create_or_show_webview(
         }
 
         let platform_id_clone = platform_id.clone();
-        builder = builder.on_page_load(move |_webview, payload| {
-            eprintln!("[webview] page loaded '{}' url={:?}", platform_id_clone, payload.url());
+        builder = builder.on_page_load(move |webview, payload| {
+            match payload.event() {
+                PageLoadEvent::Started => {
+                    eprintln!("[webview] page load STARTED '{}' url={}", platform_id_clone, payload.url());
+                }
+                PageLoadEvent::Finished => {
+                    eprintln!("[webview] page load FINISHED '{}' url={}", platform_id_clone, payload.url());
+                    // Inject JS to check for errors on the loaded page
+                    let id = platform_id_clone.clone();
+                    let _ = webview.eval(&format!(
+                        r#"
+                        (function() {{
+                            var t = document.title;
+                            var b = document.body ? document.body.innerText.substring(0, 200) : '(no body)';
+                            console.log('[webview-js] [{}] title=' + t + ' body_preview=' + b);
+                            window.__tauriDebugUrl = window.location.href;
+                            window.__tauriDebugTitle = t;
+                        }})();
+                        "#,
+                        id
+                    ));
+                }
+            }
+        });
+
+        let app_handle_for_new = app.clone();
+        builder = builder.on_new_window(move |url, _features| {
+            let url_string = url.as_str().to_string();
+            let _ = app_handle_for_new.emit("new_tab_request", url_string);
+            NewWindowResponse::Deny
         });
 
         // Download handler: save directly to ~/Downloads
