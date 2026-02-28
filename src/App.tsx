@@ -421,6 +421,12 @@ function App() {
                   placeholder="网址（如 https://chat.deepseek.com）"
                   value={quickUrl}
                   onChange={e => setQuickUrl(e.target.value)}
+                  onFocus={() => {
+                    if (!quickUrl.trim()) setQuickUrl('https://');
+                  }}
+                  onBlur={() => {
+                    if (quickUrl.trim()) setQuickUrl(normalizeUrl(quickUrl));
+                  }}
                   onKeyDown={e => e.key === 'Enter' && handleQuickAdd()}
                   autoFocus
                 />
@@ -577,6 +583,12 @@ function App() {
                     placeholder="网址（如 https://chat.deepseek.com）"
                     value={newUrl}
                     onChange={e => setNewUrl(e.target.value)}
+                    onFocus={() => {
+                      if (!newUrl.trim()) setNewUrl('https://');
+                    }}
+                    onBlur={() => {
+                      if (newUrl.trim()) setNewUrl(normalizeUrl(newUrl));
+                    }}
                     onKeyDown={e => e.key === 'Enter' && handleAddPlatform()}
                   />
                 </>
