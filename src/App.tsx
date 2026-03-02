@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Plus, Trash2, X, ChevronDown, ChevronUp, Globe, RefreshCw } from 'lucide-react';
+import { Plus, Trash2, X, ChevronDown, ChevronUp, Globe, RefreshCw, Home, Star } from 'lucide-react';
 import './App.css';
 import appLogo from '../src-tauri/icons/128x128.png';
 
@@ -145,6 +145,9 @@ function App() {
   const [initialized, setInitialized] = useState(false);
   const [useSystemProxy, setUseSystemProxy] = useState(true);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
+
+  // Hover state for tab actions (replacing dropdown context menu due to native webview clipping)
+  const [hoveredTab, setHoveredTab] = useState<string | null>(null);
 
   // Add form state
   const [selectedPreset, setSelectedPreset] = useState<string>('');
@@ -357,6 +360,18 @@ function App() {
     });
   };
 
+  const handleMenuHome = (id: string, url: string) => {
+    invoke('reload_webview_url', { platformId: id, url }).catch(console.error);
+  };
+
+  const handleMenuSaveToFavorites = (platform: Platform) => {
+    // move from temp tabs to platforms
+    const p = { ...platform, id: platform.id.replace('tmp-', 'fixed-') };
+    setPlatforms(prev => [...prev, p]);
+    setTempTabs(prev => prev.filter(t => t.id !== platform.id));
+    setActiveTab(p.id);
+  };
+
   return (
     <div className="app-container">
       <div className="titlebar">
@@ -369,6 +384,8 @@ function App() {
               key={platform.id}
               className={`tab-button ${activeTab === platform.id ? 'active' : ''}`}
               onClick={() => setActiveTab(platform.id)}
+              onMouseEnter={() => setHoveredTab(platform.id)}
+              onMouseLeave={() => setHoveredTab(null)}
             >
               {activeTab === platform.id && (
                 <button
@@ -380,8 +397,22 @@ function App() {
                   <RefreshCw size={14} />
                 </button>
               )}
-              <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={16} />
-              <span>{platform.name}</span>
+              <div className="tab-info">
+                <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={16} />
+                <span className="tab-name-text" style={{ opacity: hoveredTab === platform.id ? 0 : 1 }}>{platform.name}</span>
+                {hoveredTab === platform.id && (
+                  <div className="tab-hover-menu">
+                    <button
+                      className="tab-hover-btn"
+                      title="返回主页"
+                      onClick={(e) => { e.stopPropagation(); handleMenuHome(platform.id, platform.url); }}
+                      aria-label="返回主页"
+                    >
+                      <Home size={14} />
+                    </button>
+                  </div>
+                )}
+              </div>
               <button
                 className="tab-close-btn"
                 onClick={(e) => handleCloseTab(e, platform.id)}
@@ -400,6 +431,8 @@ function App() {
               key={platform.id}
               className={`tab-button ${activeTab === platform.id ? 'active' : ''}`}
               onClick={() => setActiveTab(platform.id)}
+              onMouseEnter={() => setHoveredTab(platform.id)}
+              onMouseLeave={() => setHoveredTab(null)}
             >
               {activeTab === platform.id && (
                 <button
@@ -411,8 +444,30 @@ function App() {
                   <RefreshCw size={14} />
                 </button>
               )}
-              <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={16} />
-              <span>{platform.name}</span>
+              <div className="tab-info">
+                <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={16} />
+                <span className="tab-name-text" style={{ opacity: hoveredTab === platform.id ? 0 : 1 }}>{platform.name}</span>
+                {hoveredTab === platform.id && (
+                  <div className="tab-hover-menu">
+                    <button
+                      className="tab-hover-btn"
+                      title="返回主页"
+                      onClick={(e) => { e.stopPropagation(); handleMenuHome(platform.id, platform.url); }}
+                      aria-label="返回主页"
+                    >
+                      <Home size={14} />
+                    </button>
+                    <button
+                      className="tab-hover-btn"
+                      title="保存到我的收藏"
+                      onClick={(e) => { e.stopPropagation(); handleMenuSaveToFavorites(platform); }}
+                      aria-label="保存到我的收藏"
+                    >
+                      <Star size={14} />
+                    </button>
+                  </div>
+                )}
+              </div>
               <button
                 className="tab-close-btn"
                 onClick={(e) => handleCloseTab(e, platform.id)}
@@ -543,6 +598,7 @@ function App() {
             });
           }
         }}
+
       />
 
       {/* Settings Slide-in Panel + Backdrop */}

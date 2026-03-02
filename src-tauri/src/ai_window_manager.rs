@@ -151,16 +151,34 @@ pub fn create_or_show_webview(
         });
 
         let app_handle_for_new = app.clone();
+        let app_handle_for_auth = app.clone();
+        let platform_id_for_auth = platform_id.clone();
         builder = builder.on_new_window(move |url, _features| {
             debug_log(&format!("[on_new_window] url={} size={:?}", url.as_str(), _features.size()));
 
-            // Allow all popups natively to preserve window.opener for OAuth flows
-            if _features.size().is_some() || url.as_str().contains("auth") || url.as_str().contains("login") || url.as_str().contains("apple") || url.as_str().contains("google") || url.as_str().contains("chatgpt.com") {
-                debug_log(" -> Allowed natively");
-                return NewWindowResponse::Allow;
+            let url_str = url.as_str();
+            let is_auth = url_str.contains("auth") || url_str.contains("login")
+                || url_str.contains("signin") || url_str.contains("signup")
+                || url_str.contains("oauth") || url_str.contains("sso")
+                || url_str.contains("apple") || url_str.contains("google")
+                || url_str.contains("github") || url_str.contains("microsoft")
+                || url_str.contains("chatgpt.com");
+
+            if is_auth || _features.size().is_some() {
+                // Navigate the originating webview to the auth URL directly.
+                // This works reliably in both dev and release builds, unlike
+                // NewWindowResponse::Allow which creates a detached native
+                // popup that macOS WKWebView cannot properly manage in
+                // release/sandboxed builds.
+                debug_log(" -> Navigating current webview to auth URL");
+                let nav_js = format!("window.location.href = '{}';", url_str.replace("'", "\\'"));
+                if let Some(wv) = app_handle_for_auth.get_webview(&platform_id_for_auth) {
+                    let _ = wv.eval(&nav_js);
+                }
+                return NewWindowResponse::Deny;
             }
 
-            let url_string = url.as_str().to_string();
+            let url_string = url_str.to_string();
             let _ = app_handle_for_new.emit("new_tab_request", url_string);
             NewWindowResponse::Deny
         });
@@ -304,6 +322,15 @@ pub fn hide_all_webviews(app: AppHandle) -> Result<(), String> {
 pub fn reload_webview(app: AppHandle, platform_id: String) -> Result<(), String> {
     if let Some(webview) = app.get_webview(&platform_id) {
         let _ = webview.eval("window.location.reload()");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reload_webview_url(app: AppHandle, platform_id: String, url: String) -> Result<(), String> {
+    if let Some(webview) = app.get_webview(&platform_id) {
+        let js = format!("window.location.href = '{}';", url.replace("'", "\\'"));
+        let _ = webview.eval(&js);
     }
     Ok(())
 }

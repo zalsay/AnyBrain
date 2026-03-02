@@ -104,7 +104,8 @@ pub fn run() {
             ai_window_manager::create_or_show_webview,
             ai_window_manager::destroy_webview,
             ai_window_manager::hide_all_webviews,
-            ai_window_manager::reload_webview
+            ai_window_manager::reload_webview,
+            ai_window_manager::reload_webview_url
         ])
         .setup(|app| {
             use tauri::Manager;
