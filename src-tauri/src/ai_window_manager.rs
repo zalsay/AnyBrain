@@ -3,6 +3,14 @@ use url::Url;
 use tauri::webview::{DownloadEvent, PageLoadEvent, NewWindowResponse};
 use std::path::PathBuf;
 
+fn debug_log(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/brainer_debug.log") {
+        let _ = writeln!(f, "{}", msg);
+    }
+    eprintln!("{}", msg);
+}
+
 /// The height of the tab bar in logical (CSS) pixels.
 /// This is the single source of truth shared with the resize handler in lib.rs.
 pub const TAB_BAR_LOGICAL_HEIGHT: f64 = 70.0;
@@ -53,6 +61,7 @@ pub fn create_or_show_webview(
     url: String,
     #[allow(unused)] top_offset: f64,
 ) -> Result<(), String> {
+    debug_log(&format!("[create_or_show_webview] id={} url={}", platform_id, url));
     let window = app.get_window("main").ok_or("Main window not found")?;
 
     // Hide other child webviews first
@@ -82,16 +91,12 @@ pub fn create_or_show_webview(
         } else {
             format!("https://{}", url)
         };
-        // 临时标签按 URL 主机名复用 user-data；固定标签按平台 id 隔离
+        // 所有标签统一按域名存储 user-data，确保数据跨会话持久化
         let host_key = match Url::parse(&normalized_url) {
-            Ok(u) => u.host_str().unwrap_or("tmp").to_string(),
-            Err(_) => "tmp".to_string(),
+            Ok(u) => u.host_str().unwrap_or("default").to_string(),
+            Err(_) => "default".to_string(),
         };
-        let store_key = if platform_id.starts_with("tmp-") {
-            format!("url-{}", host_key)
-        } else {
-            platform_id.clone()
-        };
+        let store_key = host_key;
         let data_dir = app.path().app_local_data_dir().unwrap().join("webdata").join(&store_key);
         let parsed_url = normalized_url.parse().map_err(|e| format!("Invalid URL '{}': {}", url, e))?;
         let mut builder = WebviewBuilder::new(&platform_id, WebviewUrl::External(parsed_url))
@@ -99,18 +104,17 @@ pub fn create_or_show_webview(
             
         #[cfg(target_os = "macos")]
         {
-            // Set data_store_identifier for macOS 14+ to ensure cookies/localStorage isolation
-            // It requires exactly [u8; 16] and should be a valid UUID.
-            let mut id = [0u8; 16];
-            let bytes = store_key.as_bytes();
-            let len = bytes.len().min(16);
-            id[..len].copy_from_slice(&bytes[..len]);
-            
-            // Format as a valid UUIDv4
-            id[6] = (id[6] & 0x0f) | 0x40;
-            id[8] = (id[8] & 0x3f) | 0x80;
-            
-            builder = builder.data_store_identifier(id);
+            // TEMPORARILY DISABLED: data_store_identifier may cause OAuth callback failures
+            // because the isolated WKWebsiteDataStore may not properly handle cross-domain cookies
+            // (e.g., auth.openai.com -> chatgpt.com redirects)
+            // let mut id = [0u8; 16];
+            // let bytes = store_key.as_bytes();
+            // let len = bytes.len().min(16);
+            // id[..len].copy_from_slice(&bytes[..len]);
+            // id[6] = (id[6] & 0x0f) | 0x40;
+            // id[8] = (id[8] & 0x3f) | 0x80;
+            // builder = builder.data_store_identifier(id);
+            debug_log(&format!("[webview] data_store_identifier DISABLED for '{}'", store_key));
         }
 
         let platform_id_clone = platform_id.clone();
@@ -120,27 +124,42 @@ pub fn create_or_show_webview(
                     eprintln!("[webview] page load STARTED '{}' url={}", platform_id_clone, payload.url());
                 }
                 PageLoadEvent::Finished => {
-                    eprintln!("[webview] page load FINISHED '{}' url={}", platform_id_clone, payload.url());
-                    // Inject JS to check for errors on the loaded page
-                    let id = platform_id_clone.clone();
-                    let _ = webview.eval(&format!(
+                    debug_log(&format!("[webview] page load FINISHED '{}' url={}", platform_id_clone, payload.url()));
+                    // Inject JS to capture page details and log them to /tmp/
+                    let _ = webview.eval(
                         r#"
-                        (function() {{
+                        (function() {
                             var t = document.title;
-                            var b = document.body ? document.body.innerText.substring(0, 200) : '(no body)';
-                            console.log('[webview-js] [{}] title=' + t + ' body_preview=' + b);
-                            window.__tauriDebugUrl = window.location.href;
-                            window.__tauriDebugTitle = t;
-                        }})();
-                        "#,
-                        id
-                    ));
+                            var b = document.body ? document.body.innerText.substring(0, 500) : '(no body)';
+                            var url = window.location.href;
+                            // Log detailed info for debugging OAuth errors
+                            if (url.includes('error') || url.includes('auth')) {
+                                var xhr = new XMLHttpRequest();
+                                xhr.open('POST', 'https://localhost/__tauri_debug__', false);
+                                // We can't make this request, but we can use console
+                                console.log('[BRAINER-DEBUG] url=' + url);
+                                console.log('[BRAINER-DEBUG] title=' + t);
+                                console.log('[BRAINER-DEBUG] body=' + b);
+                                console.log('[BRAINER-DEBUG] cookies=' + document.cookie);
+                                console.log('[BRAINER-DEBUG] localStorage_keys=' + Object.keys(localStorage || {}).join(','));
+                            }
+                        })();
+                        "#
+                    );
                 }
             }
         });
 
         let app_handle_for_new = app.clone();
         builder = builder.on_new_window(move |url, _features| {
+            debug_log(&format!("[on_new_window] url={} size={:?}", url.as_str(), _features.size()));
+
+            // Allow all popups natively to preserve window.opener for OAuth flows
+            if _features.size().is_some() || url.as_str().contains("auth") || url.as_str().contains("login") || url.as_str().contains("apple") || url.as_str().contains("google") || url.as_str().contains("chatgpt.com") {
+                debug_log(" -> Allowed natively");
+                return NewWindowResponse::Allow;
+            }
+
             let url_string = url.as_str().to_string();
             let _ = app_handle_for_new.emit("new_tab_request", url_string);
             NewWindowResponse::Deny
@@ -181,10 +200,80 @@ pub fn create_or_show_webview(
             }
         });
 
-        let _webview = window
+        let created_webview = window
             .add_child(builder, position, size)
             .map_err(|e| e.to_string())?;
-        eprintln!("[webview] created new '{}'", platform_id);
+
+        // Enable javaScriptCanOpenWindowsAutomatically on macOS WKWebView
+        // Without this, window.open() is silently blocked before reaching on_new_window
+        #[cfg(target_os = "macos")]
+        created_webview.with_webview(|wv| {
+            unsafe {
+                // wv.inner() returns *mut c_void which is a raw WKWebView pointer
+                let wk_webview: *mut std::ffi::c_void = wv.inner();
+                if wk_webview.is_null() {
+                    debug_log("[webview] wk_webview is null, cannot enable javaScriptCanOpenWindowsAutomatically");
+                    return;
+                }
+
+                // Use Objective-C runtime to call:
+                //   [[wkWebView configuration] preferences] setValue:@YES forKey:@"javaScriptCanOpenWindowsAutomatically"
+                extern "C" {
+                    fn objc_msgSend(obj: *mut std::ffi::c_void, sel: *mut std::ffi::c_void, ...) -> *mut std::ffi::c_void;
+                    fn sel_registerName(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+                }
+
+                let sel_configuration = sel_registerName(b"configuration\0".as_ptr() as *const _);
+                let sel_preferences = sel_registerName(b"preferences\0".as_ptr() as *const _);
+                let sel_set_value = sel_registerName(b"setValue:forKey:\0".as_ptr() as *const _);
+
+                // Get NSNumber YES
+                let sel_number_with_bool = sel_registerName(b"numberWithBool:\0".as_ptr() as *const _);
+                let ns_number_class = {
+                    extern "C" {
+                        fn objc_getClass(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+                    }
+                    objc_getClass(b"NSNumber\0".as_ptr() as *const _)
+                };
+                let yes_value: *mut std::ffi::c_void = {
+                    let f: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, i8) -> *mut std::ffi::c_void = std::mem::transmute(objc_msgSend as *const ());
+                    f(ns_number_class, sel_number_with_bool, 1i8)
+                };
+
+                // Get NSString for key
+                let ns_string_class = {
+                    extern "C" {
+                        fn objc_getClass(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+                    }
+                    objc_getClass(b"NSString\0".as_ptr() as *const _)
+                };
+                let sel_string_with_utf8 = sel_registerName(b"stringWithUTF8String:\0".as_ptr() as *const _);
+                let key_str: *mut std::ffi::c_void = {
+                    let f: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, *const std::ffi::c_char) -> *mut std::ffi::c_void = std::mem::transmute(objc_msgSend as *const ());
+                    f(ns_string_class, sel_string_with_utf8, b"javaScriptCanOpenWindowsAutomatically\0".as_ptr() as *const _)
+                };
+
+                // [wkWebView configuration]
+                let config: *mut std::ffi::c_void = {
+                    let f: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> *mut std::ffi::c_void = std::mem::transmute(objc_msgSend as *const ());
+                    f(wk_webview, sel_configuration)
+                };
+
+                // [[wkWebView configuration] preferences]
+                let prefs: *mut std::ffi::c_void = {
+                    let f: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> *mut std::ffi::c_void = std::mem::transmute(objc_msgSend as *const ());
+                    f(config, sel_preferences)
+                };
+
+                // [prefs setValue:@YES forKey:@"javaScriptCanOpenWindowsAutomatically"]
+                let f: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void) = std::mem::transmute(objc_msgSend as *const ());
+                f(prefs, sel_set_value, yes_value, key_str);
+
+                debug_log("[webview] enabled javaScriptCanOpenWindowsAutomatically via raw objc");
+            }
+        }).unwrap_or_else(|e| debug_log(&format!("[webview] with_webview error: {}", e)));
+
+        debug_log(&format!("[webview] created new '{}'", platform_id));
     }
 
     Ok(())
