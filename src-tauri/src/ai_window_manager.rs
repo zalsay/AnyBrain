@@ -118,34 +118,13 @@ pub fn create_or_show_webview(
         }
 
         let platform_id_clone = platform_id.clone();
-        builder = builder.on_page_load(move |webview, payload| {
+        builder = builder.on_page_load(move |_webview, payload| {
             match payload.event() {
                 PageLoadEvent::Started => {
                     eprintln!("[webview] page load STARTED '{}' url={}", platform_id_clone, payload.url());
                 }
                 PageLoadEvent::Finished => {
                     debug_log(&format!("[webview] page load FINISHED '{}' url={}", platform_id_clone, payload.url()));
-                    // Inject JS to capture page details and log them to /tmp/
-                    let _ = webview.eval(
-                        r#"
-                        (function() {
-                            var t = document.title;
-                            var b = document.body ? document.body.innerText.substring(0, 500) : '(no body)';
-                            var url = window.location.href;
-                            // Log detailed info for debugging OAuth errors
-                            if (url.includes('error') || url.includes('auth')) {
-                                var xhr = new XMLHttpRequest();
-                                xhr.open('POST', 'https://localhost/__tauri_debug__', false);
-                                // We can't make this request, but we can use console
-                                console.log('[BRAINER-DEBUG] url=' + url);
-                                console.log('[BRAINER-DEBUG] title=' + t);
-                                console.log('[BRAINER-DEBUG] body=' + b);
-                                console.log('[BRAINER-DEBUG] cookies=' + document.cookie);
-                                console.log('[BRAINER-DEBUG] localStorage_keys=' + Object.keys(localStorage || {}).join(','));
-                            }
-                        })();
-                        "#
-                    );
                 }
             }
         });
