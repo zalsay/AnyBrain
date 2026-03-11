@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use tauri_plugin_shell::ShellExt;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct WindowState {
@@ -88,6 +89,108 @@ fn save_settings(app: tauri::AppHandle, data: String) -> Result<(), String> {
     fs::write(&path, &data).map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShortcutCommandResult {
+    stdout: Option<String>,
+    stderr: Option<String>,
+    exit_code: Option<i32>,
+    error: Option<String>,
+}
+
+type ShortcutCommandResultPayload = Result<ShortcutCommandResult, String>;
+
+#[tauri::command]
+async fn run_shortcut_command(app: tauri::AppHandle, command: String, exec_mode: String) -> ShortcutCommandResultPayload {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err("命令为空".to_string());
+    }
+
+    if trimmed.len() > 4096 {
+        return Err("命令过长".to_string());
+    }
+
+    let shell = app.shell();
+
+    match exec_mode.as_str() {
+        "external_terminal" => {
+            #[cfg(target_os = "macos")]
+            {
+                let escaped = trimmed.replace('\\', "\\\\").replace('"', "\\\"");
+                let apple_script = format!("tell application \"Terminal\" to do script \"{}\"", escaped);
+                shell.command("osascript")
+                    .args(["-e", &apple_script])
+                    .status()
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            #[cfg(target_os = "windows")]
+            {
+                shell.command("cmd")
+                    .args(["/C", "start", "cmd", "/K", trimmed])
+                    .status()
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                shell.command("x-terminal-emulator")
+                    .args(["-e", "sh", "-c", trimmed])
+                    .status()
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+
+            Ok(ShortcutCommandResult {
+                stdout: None,
+                stderr: None,
+                exit_code: None,
+                error: None,
+            })
+        }
+        "shell_status_only" => {
+            #[cfg(target_os = "windows")]
+            let command_builder = shell.command("cmd").args(["/C", trimmed]);
+            #[cfg(not(target_os = "windows"))]
+            let command_builder = shell.command("sh").args(["-c", trimmed]);
+
+            let status = command_builder
+                .status()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            Ok(ShortcutCommandResult {
+                stdout: None,
+                stderr: None,
+                exit_code: status.code(),
+                error: None,
+            })
+        }
+        _ => {
+            #[cfg(target_os = "windows")]
+            let command_builder = shell.command("cmd").args(["/C", trimmed]);
+            #[cfg(not(target_os = "windows"))]
+            let command_builder = shell.command("sh").args(["-c", trimmed]);
+
+            let output = command_builder
+                .output()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+            Ok(ShortcutCommandResult {
+                stdout: Some(stdout),
+                stderr: Some(stderr),
+                exit_code: output.status.code(),
+                error: None,
+            })
+        }
+    }
+}
+
 mod ai_window_manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -95,12 +198,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             greet,
             load_platforms,
             save_platforms,
             load_settings,
             save_settings,
+            run_shortcut_command,
             ai_window_manager::create_or_show_webview,
             ai_window_manager::destroy_webview,
             ai_window_manager::hide_all_webviews,

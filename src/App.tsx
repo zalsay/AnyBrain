@@ -33,6 +33,32 @@ interface Platform {
   hidden?: boolean;
 }
 
+type ExecMode = 'shell_with_output' | 'shell_status_only' | 'external_terminal';
+type CommandExecMode = ExecMode | 'inherit';
+
+interface ShortcutCommand {
+  id: string;
+  name: string;
+  cmd: string;
+  execMode?: CommandExecMode;
+}
+
+interface ShortcutCommandSettings {
+  defaultExecMode: ExecMode;
+}
+
+const EXEC_MODE_OPTIONS: Array<{ value: ExecMode; label: string }> = [
+  { value: 'shell_with_output', label: '本地 shell（显示输出）' },
+  { value: 'shell_status_only', label: '本地 shell（仅状态）' },
+  { value: 'external_terminal', label: '外部终端执行' }
+];
+
+const COMMAND_STATUS_LABELS: Record<'running' | 'success' | 'error', string> = {
+  running: '运行中',
+  success: '成功',
+  error: '失败'
+};
+
 const POPULAR_PLATFORMS = [
   { id: 'openai', name: 'ChatGPT', url: 'https://chatgpt.com' },
   { id: 'claude', name: 'Claude', url: 'https://claude.ai' },
@@ -46,6 +72,7 @@ const POPULAR_PLATFORMS = [
 
 const STORAGE_KEY = 'ai-chaty-platforms';
 const SETTINGS_DEFAULTS = { useSystemProxy: true };
+const COMMAND_SETTINGS_DEFAULTS: ShortcutCommandSettings = { defaultExecMode: 'shell_with_output' };
 
 // Try loading from Rust file first, fall back to localStorage for migration
 async function loadPlatformsAsync(): Promise<Platform[]> {
@@ -145,6 +172,14 @@ function App() {
   const [initialized, setInitialized] = useState(false);
   const [useSystemProxy, setUseSystemProxy] = useState(true);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
+  const [shortcutCommands, setShortcutCommands] = useState<ShortcutCommand[]>([]);
+  const [commandSettings, setCommandSettings] = useState<ShortcutCommandSettings>(COMMAND_SETTINGS_DEFAULTS);
+  const [showCommandAddForm, setShowCommandAddForm] = useState(false);
+  const [commandDraftName, setCommandDraftName] = useState('');
+  const [commandDraftValue, setCommandDraftValue] = useState('');
+  const [commandOutputs, setCommandOutputs] = useState<Record<string, { output: string; error: string; exitCode: number | null }>>({});
+  const [expandedCommandOutputs, setExpandedCommandOutputs] = useState<Record<string, boolean>>({});
+  const [commandStatuses, setCommandStatuses] = useState<Record<string, 'running' | 'success' | 'error'>>({});
 
   // Hover state for tab actions (replacing dropdown context menu due to native webview clipping)
   const [hoveredTab, setHoveredTab] = useState<string | null>(null);
@@ -170,8 +205,13 @@ function App() {
     // Load settings
     invoke('load_settings').then((data: unknown) => {
       try {
-        const settings = { ...SETTINGS_DEFAULTS, ...JSON.parse(data as string) };
+        const parsed = JSON.parse(data as string);
+        const settings = { ...SETTINGS_DEFAULTS, ...parsed };
         setUseSystemProxy(settings.useSystemProxy);
+        const loadedCommands = Array.isArray(parsed?.shortcutCommands) ? parsed.shortcutCommands : [];
+        const loadedCommandSettings = { ...COMMAND_SETTINGS_DEFAULTS, ...(parsed?.shortcutCommandSettings || {}) };
+        setShortcutCommands(loadedCommands);
+        setCommandSettings(loadedCommandSettings);
       } catch { }
     }).catch(() => { });
   }, []);
@@ -236,11 +276,14 @@ function App() {
       invoke('hide_all_webviews').catch(console.error);
       setShowSettings(true);
       setShowQuickAdd(false);
+      setShowCommandAddForm(false);
     } else {
       // Closing settings: re-show the active webview
       setShowSettings(false);
       setShowAddForm(false);
       resetAddForm();
+      setShowCommandAddForm(false);
+      resetCommandDraft();
       const platform = platforms.find(p => p.id === activeTab && !p.hidden);
       if (platform) {
         invoke('create_or_show_webview', {
@@ -263,6 +306,129 @@ function App() {
     setQuickUrl('');
   };
 
+  const resetCommandDraft = () => {
+    setCommandDraftName('');
+    setCommandDraftValue('');
+  };
+
+  const saveSettings = (next: Record<string, unknown>) => {
+    invoke('save_settings', { data: JSON.stringify(next) }).catch(console.error);
+  };
+
+  const updateCommandSettings = (partial: Partial<ShortcutCommandSettings>) => {
+    setCommandSettings(prev => {
+      const next = { ...prev, ...partial };
+      saveSettings({ useSystemProxy, shortcutCommands, shortcutCommandSettings: next });
+      return next;
+    });
+  };
+
+  const updateShortcutCommands = (updater: (prev: ShortcutCommand[]) => ShortcutCommand[]) => {
+    setShortcutCommands(prev => {
+      const next = updater(prev);
+      saveSettings({ useSystemProxy, shortcutCommands: next, shortcutCommandSettings: commandSettings });
+      return next;
+    });
+  };
+
+  const resolveCommandExecMode = (command: ShortcutCommand): ExecMode => {
+    if (command.execMode && command.execMode !== 'inherit') return command.execMode;
+    return commandSettings.defaultExecMode;
+  };
+
+  const formatCommandOutput = (value?: string | null) => (value ?? '').trim();
+
+  const handleAddShortcutCommand = () => {
+    if (!commandDraftName.trim() || !commandDraftValue.trim()) return;
+    const id = `cmd-${Date.now()}`;
+    const nextCommand: ShortcutCommand = {
+      id,
+      name: commandDraftName.trim(),
+      cmd: commandDraftValue.trim(),
+      execMode: 'inherit'
+    };
+    updateShortcutCommands(prev => [...prev, nextCommand]);
+    setShowCommandAddForm(false);
+    resetCommandDraft();
+  };
+
+  const handleRemoveShortcutCommand = (id: string) => {
+    updateShortcutCommands(prev => prev.filter(cmd => cmd.id !== id));
+    setCommandOutputs(prev => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    setExpandedCommandOutputs(prev => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    setCommandStatuses(prev => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  };
+
+  const handleCommandExecModeChange = (id: string, execMode: CommandExecMode) => {
+    updateShortcutCommands(prev => prev.map(cmd => cmd.id === id ? { ...cmd, execMode } : cmd));
+  };
+
+  const showCommandStatus = (id: string, status: 'success' | 'error') => {
+    setCommandStatuses(prev => ({ ...prev, [id]: status }));
+    window.setTimeout(() => {
+      setCommandStatuses(prev => {
+        const next = { ...prev };
+        if (next[id] === status) delete next[id];
+        return next;
+      });
+    }, 1500);
+  };
+
+  const handleExecuteCommand = async (command: ShortcutCommand) => {
+    const execMode = resolveCommandExecMode(command);
+    setCommandStatuses(prev => ({ ...prev, [command.id]: 'running' }));
+    try {
+      const result = await invoke('run_shortcut_command', {
+        command: command.cmd,
+        execMode
+      }) as { stdout?: string; stderr?: string; exitCode?: number | null; error?: string | null };
+
+      if (execMode === 'shell_with_output') {
+        setCommandOutputs(prev => ({
+          ...prev,
+          [command.id]: {
+            output: formatCommandOutput(result.stdout),
+            error: formatCommandOutput(result.stderr || result.error),
+            exitCode: result.exitCode ?? null
+          }
+        }));
+        setExpandedCommandOutputs(prev => ({ ...prev, [command.id]: true }));
+      }
+
+      if (result.exitCode === 0 || result.exitCode === null) {
+        showCommandStatus(command.id, 'success');
+      } else {
+        showCommandStatus(command.id, 'error');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (execMode === 'shell_with_output') {
+        setCommandOutputs(prev => ({
+          ...prev,
+          [command.id]: {
+            output: '',
+            error: message,
+            exitCode: null
+          }
+        }));
+        setExpandedCommandOutputs(prev => ({ ...prev, [command.id]: true }));
+      }
+      showCommandStatus(command.id, 'error');
+    }
+  };
+
   const handlePresetSelect = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const val = e.target.value;
     setSelectedPreset(val);
@@ -278,6 +444,7 @@ function App() {
       }
     }
   };
+
 
   const handleAddPlatform = () => {
     if (!newName.trim() || !newUrl.trim()) return;
@@ -318,6 +485,19 @@ function App() {
     });
   };
 
+  const handleReloadPlatform = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    const platform = tempTabs.find(p => p.id === id) || platforms.find(p => p.id === id);
+    if (!platform) return;
+    const isExternal = platform.url?.startsWith('http');
+    const isLocal = platform.url?.startsWith('http://localhost') || platform.url?.startsWith('http://127.0.0.1');
+    if (isExternal || isLocal) {
+      invoke('reload_webview', { platformId: id }).catch(console.error);
+    } else {
+      invoke('reload_webview_url', { platformId: id, url: platform.url }).catch(console.error);
+    }
+  };
+
   const handleMovePlatform = (index: number, direction: 'up' | 'down') => {
     setPlatforms(prev => {
       const updated = [...prev];
@@ -328,11 +508,6 @@ function App() {
       }
       return updated;
     });
-  };
-
-  const handleReloadPlatform = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
-    invoke('reload_webview', { platformId: id }).catch(console.error);
   };
 
   const handleCloseTab = (e: React.MouseEvent, id: string) => {
@@ -727,6 +902,141 @@ function App() {
 
           <div className="panel-divider" />
 
+          <div className="panel-section-header">
+            <div className="panel-section-title">快捷命令</div>
+          </div>
+
+          <div className="panel-setting-item">
+            <span className="panel-setting-label">默认执行方式</span>
+            <div className="panel-setting-control">
+              <select
+                className="panel-select"
+                value={commandSettings.defaultExecMode}
+                onChange={e => updateCommandSettings({ defaultExecMode: e.target.value as ExecMode })}
+              >
+                {EXEC_MODE_OPTIONS.map(option => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              <ChevronDown className="select-icon" size={14} />
+            </div>
+          </div>
+
+          {shortcutCommands.length === 0 ? (
+            <div className="empty-panel-msg">暂无快捷命令</div>
+          ) : (
+            shortcutCommands.map(command => {
+              const execMode = resolveCommandExecMode(command);
+              const output = commandOutputs[command.id];
+              const expanded = expandedCommandOutputs[command.id];
+              const status = commandStatuses[command.id];
+              return (
+                <div key={command.id} className="panel-command-item">
+                  <div className="panel-command-row">
+                    <div className="panel-command-info">
+                      <span className="panel-command-name">{command.name}</span>
+                      <span className="panel-command-text">{command.cmd}</span>
+                    </div>
+                    <div className="panel-command-actions">
+                      <div className="panel-command-select">
+                        <select
+                          className="panel-select"
+                          value={command.execMode ?? 'inherit'}
+                          onChange={e => handleCommandExecModeChange(command.id, e.target.value as CommandExecMode)}
+                        >
+                          <option value="inherit">跟随默认</option>
+                          {EXEC_MODE_OPTIONS.map(option => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                        <ChevronDown className="select-icon" size={14} />
+                      </div>
+                      <button
+                        className={`panel-command-run ${status ? `is-${status}` : ''}`}
+                        onClick={() => handleExecuteCommand(command)}
+                      >
+                        {status ? COMMAND_STATUS_LABELS[status] : '执行'}
+                      </button>
+                      <button
+                        className="panel-item-delete"
+                        onClick={() => handleRemoveShortcutCommand(command.id)}
+                        title="删除"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                  {execMode === 'shell_with_output' && output && (
+                    <div className="panel-command-output">
+                      <button
+                        className="panel-command-output-toggle"
+                        onClick={() => setExpandedCommandOutputs(prev => ({ ...prev, [command.id]: !expanded }))}
+                      >
+                        <span>{expanded ? '收起输出' : '展开输出'}</span>
+                        <ChevronDown size={14} className={expanded ? 'is-expanded' : ''} />
+                      </button>
+                      {expanded && (
+                        <div className="panel-command-output-body">
+                          {output.output && (
+                            <pre className="panel-command-output-text">{output.output}</pre>
+                          )}
+                          {output.error && (
+                            <pre className="panel-command-output-error">{output.error}</pre>
+                          )}
+                          {output.exitCode !== null && (
+                            <div className="panel-command-output-exit">退出码：{output.exitCode}</div>
+                          )}
+                          {!output.output && !output.error && (
+                            <div className="panel-command-output-empty">无输出</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+
+          {!showCommandAddForm ? (
+            <button className="panel-add-btn" onClick={() => setShowCommandAddForm(true)}>
+              <Plus size={16} />
+              <span>添加快捷命令</span>
+            </button>
+          ) : (
+            <div className="add-form">
+              <input
+                className="add-input"
+                placeholder="名称（如 清理缓存）"
+                value={commandDraftName}
+                onChange={e => setCommandDraftName(e.target.value)}
+                autoFocus
+              />
+              <input
+                className="add-input"
+                placeholder="命令（如 npm run build）"
+                value={commandDraftValue}
+                onChange={e => setCommandDraftValue(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleAddShortcutCommand()}
+              />
+              <div className="add-form-actions">
+                <button className="add-form-cancel" onClick={() => {
+                  setShowCommandAddForm(false);
+                  resetCommandDraft();
+                }}>取消</button>
+                <button
+                  className="add-form-confirm"
+                  onClick={handleAddShortcutCommand}
+                  disabled={!commandDraftName.trim() || !commandDraftValue.trim()}
+                >
+                  添加
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="panel-divider" />
+
           <div className="panel-setting-item">
             <span className="panel-setting-label">使用系统代理</span>
             <button
@@ -734,7 +1044,7 @@ function App() {
               onClick={() => {
                 const newVal = !useSystemProxy;
                 setUseSystemProxy(newVal);
-                invoke('save_settings', { data: JSON.stringify({ useSystemProxy: newVal }) }).catch(console.error);
+                saveSettings({ useSystemProxy: newVal, shortcutCommands, shortcutCommandSettings: commandSettings });
               }}
               role="switch"
               aria-checked={useSystemProxy}
