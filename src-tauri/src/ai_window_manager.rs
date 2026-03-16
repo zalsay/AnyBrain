@@ -15,6 +15,157 @@ fn debug_log(msg: &str) {
 /// This is the single source of truth shared with the resize handler in lib.rs.
 pub const TAB_BAR_LOGICAL_HEIGHT: f64 = 70.0;
 
+const TTS_INJECT_SCRIPT: &str = r###"(function () {
+  if (window.__brainer_tts_bootstrap) {
+    if (window.__brainer_tts_init) {
+      window.__brainer_tts_init();
+    }
+    return;
+  }
+  window.__brainer_tts_bootstrap = true;
+
+  const state = window.__brainer_tts_state || (window.__brainer_tts_state = { text: '', btn: null });
+
+  function ensureStyle() {
+    if (document.getElementById('brainer-tts-style')) return;
+    if (!document.head) {
+      document.addEventListener('DOMContentLoaded', ensureStyle, { once: true });
+      return;
+    }
+    const style = document.createElement('style');
+    style.id = 'brainer-tts-style';
+    style.textContent =
+      '#brainer-tts-fab{' +
+      'position:fixed;' +
+      'z-index:2147483647;' +
+      'display:none;' +
+      'padding:6px 10px;' +
+      'background:#111;' +
+      'color:#fff;' +
+      'border:0;' +
+      'border-radius:999px;' +
+      'font-size:12px;' +
+      'line-height:1;' +
+      'box-shadow:0 4px 14px rgba(0,0,0,0.2);' +
+      'cursor:pointer;' +
+      'user-select:none;' +
+      '}' +
+      '#brainer-tts-fab:active{transform:scale(0.98);}';
+    document.head.appendChild(style);
+  }
+
+  function ensureButton() {
+    let btn = document.getElementById('brainer-tts-fab');
+    if (!btn) {
+      if (!document.body) {
+        document.addEventListener('DOMContentLoaded', ensureButton, { once: true });
+        return;
+      }
+      btn = document.createElement('button');
+      btn.id = 'brainer-tts-fab';
+      btn.type = 'button';
+      btn.textContent = '朗读';
+      document.body.appendChild(btn);
+    }
+    if (!btn.__brainer_bound) {
+      btn.__brainer_bound = true;
+      btn.addEventListener('click', onButtonClick, true);
+    }
+    state.btn = btn;
+  }
+
+  function hideButton() {
+    if (state.btn) state.btn.style.display = 'none';
+  }
+
+  function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+  }
+
+  function positionButton(rect) {
+    ensureButton();
+    const btn = state.btn;
+    if (!btn) return;
+    const padding = 8;
+    const left = clamp(rect.right + 8, padding, window.innerWidth - btn.offsetWidth - padding);
+    const top = clamp(rect.top - 8, padding, window.innerHeight - btn.offsetHeight - padding);
+    btn.style.left = Math.round(left) + 'px';
+    btn.style.top = Math.round(top) + 'px';
+    btn.style.display = 'block';
+  }
+
+  function getSelectionData() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return null;
+    const text = sel.toString().trim();
+    if (!text) return null;
+    if (!sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
+    if (!rect || (rect.width === 0 && rect.height === 0)) return null;
+    return { text, rect };
+  }
+
+  function updateFromSelection() {
+    const data = getSelectionData();
+    if (!data) {
+      hideButton();
+      return;
+    }
+    state.text = data.text;
+    positionButton(data.rect);
+  }
+
+  function onButtonClick(ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (!state.text) {
+      hideButton();
+      return;
+    }
+    if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
+      console.warn('[brainer-tts] speechSynthesis not available');
+      hideButton();
+      return;
+    }
+    try {
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(state.text);
+      utter.rate = 0.9;
+      window.speechSynthesis.speak(utter);
+    } catch (err) {
+      console.warn('[brainer-tts] speak failed', err);
+    }
+  }
+
+  function onMouseDown(ev) {
+    if (state.btn && state.btn.contains(ev.target)) return;
+    hideButton();
+  }
+
+  function setupListeners() {
+    if (window.__brainer_tts_listeners) return;
+    window.__brainer_tts_listeners = true;
+    document.addEventListener('selectionchange', updateFromSelection);
+    document.addEventListener('mouseup', updateFromSelection);
+    document.addEventListener('keyup', updateFromSelection);
+    document.addEventListener('mousedown', onMouseDown, true);
+    window.addEventListener('scroll', hideButton, true);
+  }
+
+  window.__brainer_tts_init = function () {
+    ensureStyle();
+    ensureButton();
+  };
+
+  setupListeners();
+  ensureStyle();
+  ensureButton();
+})();
+"###;
+
+const TTS_REINIT_SCRIPT: &str = "window.__brainer_tts_init && window.__brainer_tts_init();";
+
 /// Compute the child webview's physical bounds based on the main window's current size.
 fn compute_child_bounds(window: &tauri::Window) -> (PhysicalPosition<i32>, PhysicalSize<u32>) {
     let physical_size = window.inner_size().unwrap();
@@ -100,8 +251,9 @@ pub fn create_or_show_webview(
         let data_dir = app.path().app_local_data_dir().unwrap().join("webdata").join(&store_key);
         let parsed_url = normalized_url.parse().map_err(|e| format!("Invalid URL '{}': {}", url, e))?;
         let mut builder = WebviewBuilder::new(&platform_id, WebviewUrl::External(parsed_url))
-            .data_directory(data_dir);
-            
+            .data_directory(data_dir)
+            .initialization_script(TTS_INJECT_SCRIPT);
+
         #[cfg(target_os = "macos")]
         {
             // TEMPORARILY DISABLED: data_store_identifier may cause OAuth callback failures
@@ -125,6 +277,7 @@ pub fn create_or_show_webview(
                 }
                 PageLoadEvent::Finished => {
                     debug_log(&format!("[webview] page load FINISHED '{}' url={}", platform_id_clone, payload.url()));
+                    let _ = _webview.eval(TTS_REINIT_SCRIPT);
                 }
             }
         });
