@@ -680,6 +680,31 @@ body {
   align-items: center;
 }
 
+.panel-setting-control-rate {
+  gap: 10px;
+}
+
+.panel-range {
+  width: 180px;
+  accent-color: #5b9bd5;
+}
+
+.panel-number {
+  width: 70px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background-color: var(--tab-bg);
+  color: var(--text-color);
+  font-size: 12px;
+  outline: none;
+}
+
+.panel-number:focus {
+  border-color: #5b9bd5;
+  box-shadow: 0 0 0 3px rgba(91, 155, 213, 0.2);
+}
+
 .panel-select {
   appearance: none;
   border: 1px solid var(--border-color);

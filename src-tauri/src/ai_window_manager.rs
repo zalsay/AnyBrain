@@ -26,6 +26,17 @@ const TTS_INJECT_SCRIPT: &str = r###"(function () {
 
   const state = window.__brainer_tts_state || (window.__brainer_tts_state = { text: '', btn: null });
 
+  function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+  }
+
+  window.__brainer_tts_rate = typeof window.__brainer_tts_rate === 'number' ? window.__brainer_tts_rate : 0.9;
+  window.__brainer_tts_set_rate = function (rate) {
+    const next = Number(rate);
+    if (!Number.isFinite(next)) return;
+    window.__brainer_tts_rate = clamp(next, 0.7, 1.3);
+  };
+
   function ensureStyle() {
     if (document.getElementById('brainer-tts-style')) return;
     if (!document.head) {
@@ -78,10 +89,6 @@ const TTS_INJECT_SCRIPT: &str = r###"(function () {
     if (state.btn) state.btn.style.display = 'none';
   }
 
-  function clamp(value, min, max) {
-    return Math.min(Math.max(value, min), max);
-  }
-
   function positionButton(rect) {
     ensureButton();
     const btn = state.btn;
@@ -131,7 +138,7 @@ const TTS_INJECT_SCRIPT: &str = r###"(function () {
     try {
       window.speechSynthesis.cancel();
       const utter = new SpeechSynthesisUtterance(state.text);
-      utter.rate = 0.9;
+      utter.rate = window.__brainer_tts_rate ?? 0.9;
       window.speechSynthesis.speak(utter);
     } catch (err) {
       console.warn('[brainer-tts] speak failed', err);
@@ -463,6 +470,25 @@ pub fn reload_webview_url(app: AppHandle, platform_id: String, url: String) -> R
     if let Some(webview) = app.get_webview(&platform_id) {
         let js = format!("window.location.href = '{}';", url.replace("'", "\\'"));
         let _ = webview.eval(&js);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_tts_rate(app: AppHandle, rate: f64) -> Result<(), String> {
+    let clamped = if rate.is_finite() {
+        rate.clamp(0.7, 1.3)
+    } else {
+        0.9
+    };
+    let js = format!(
+        "window.__brainer_tts_rate = {0}; window.__brainer_tts_set_rate && window.__brainer_tts_set_rate({0});",
+        clamped
+    );
+    for webview in app.webviews().values() {
+        if webview.label() != "main" {
+            let _ = webview.eval(&js);
+        }
     }
     Ok(())
 }

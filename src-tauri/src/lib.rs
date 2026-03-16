@@ -210,7 +210,8 @@ pub fn run() {
             ai_window_manager::destroy_webview,
             ai_window_manager::hide_all_webviews,
             ai_window_manager::reload_webview,
-            ai_window_manager::reload_webview_url
+            ai_window_manager::reload_webview_url,
+            ai_window_manager::set_tts_rate
         ])
         .setup(|app| {
             use tauri::Manager;

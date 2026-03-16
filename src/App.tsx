@@ -71,7 +71,7 @@ const POPULAR_PLATFORMS = [
 ];
 
 const STORAGE_KEY = 'ai-chaty-platforms';
-const SETTINGS_DEFAULTS = { useSystemProxy: true };
+const SETTINGS_DEFAULTS = { useSystemProxy: true, speechRate: 0.9 };
 const COMMAND_SETTINGS_DEFAULTS: ShortcutCommandSettings = { defaultExecMode: 'shell_with_output' };
 
 // Try loading from Rust file first, fall back to localStorage for migration
@@ -170,8 +170,10 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
   const [initialized, setInitialized] = useState(false);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [useSystemProxy, setUseSystemProxy] = useState(true);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
+  const [speechRate, setSpeechRate] = useState(0.9);
   const [shortcutCommands, setShortcutCommands] = useState<ShortcutCommand[]>([]);
   const [commandSettings, setCommandSettings] = useState<ShortcutCommandSettings>(COMMAND_SETTINGS_DEFAULTS);
   const [showCommandAddForm, setShowCommandAddForm] = useState(false);
@@ -208,12 +210,18 @@ function App() {
         const parsed = JSON.parse(data as string);
         const settings = { ...SETTINGS_DEFAULTS, ...parsed };
         setUseSystemProxy(settings.useSystemProxy);
+        setSpeechRate(settings.speechRate);
         const loadedCommands = Array.isArray(parsed?.shortcutCommands) ? parsed.shortcutCommands : [];
         const loadedCommandSettings = { ...COMMAND_SETTINGS_DEFAULTS, ...(parsed?.shortcutCommandSettings || {}) };
         setShortcutCommands(loadedCommands);
         setCommandSettings(loadedCommandSettings);
-      } catch { }
-    }).catch(() => { });
+        setSettingsLoaded(true);
+      } catch {
+        setSettingsLoaded(true);
+      }
+    }).catch(() => {
+      setSettingsLoaded(true);
+    });
   }, []);
 
   // Make sure we have an active tab if platforms exist but activeTab is empty
@@ -246,9 +254,16 @@ function App() {
         platformId: platform.id,
         url: platform.url,
         topOffset: 70.0
-      }).catch(console.error);
+      })
+        .then(() => invoke('set_tts_rate', { rate: speechRate }))
+        .catch(console.error);
     }
-  }, [activeTab, platforms, tempTabs, showSettings]);
+  }, [activeTab, platforms, tempTabs, showSettings, speechRate]);
+
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    invoke('set_tts_rate', { rate: speechRate }).catch(console.error);
+  }, [speechRate, settingsLoaded]);
 
   // 监听来自子 WebView 的新窗口请求，转为应用内新建临时标签
   useEffect(() => {
@@ -318,7 +333,7 @@ function App() {
   const updateCommandSettings = (partial: Partial<ShortcutCommandSettings>) => {
     setCommandSettings(prev => {
       const next = { ...prev, ...partial };
-      saveSettings({ useSystemProxy, shortcutCommands, shortcutCommandSettings: next });
+      saveSettings({ useSystemProxy, speechRate, shortcutCommands, shortcutCommandSettings: next });
       return next;
     });
   };
@@ -326,7 +341,7 @@ function App() {
   const updateShortcutCommands = (updater: (prev: ShortcutCommand[]) => ShortcutCommand[]) => {
     setShortcutCommands(prev => {
       const next = updater(prev);
-      saveSettings({ useSystemProxy, shortcutCommands: next, shortcutCommandSettings: commandSettings });
+      saveSettings({ useSystemProxy, speechRate, shortcutCommands: next, shortcutCommandSettings: commandSettings });
       return next;
     });
   };
@@ -903,6 +918,48 @@ function App() {
           <div className="panel-divider" />
 
           <div className="panel-section-header">
+            <div className="panel-section-title">语音朗读</div>
+          </div>
+
+          <div className="panel-setting-item">
+            <span className="panel-setting-label">语音朗读速度</span>
+            <div className="panel-setting-control panel-setting-control-rate">
+              <input
+                className="panel-range"
+                type="range"
+                min={0.7}
+                max={1.3}
+                step={0.05}
+                value={speechRate}
+                onChange={e => {
+                  const nextRate = Number.parseFloat(e.target.value);
+                  setSpeechRate(nextRate);
+                  invoke('set_tts_rate', { rate: nextRate }).catch(console.error);
+                  saveSettings({ useSystemProxy, speechRate: nextRate, shortcutCommands, shortcutCommandSettings: commandSettings });
+                }}
+              />
+              <input
+                className="panel-number"
+                type="number"
+                min={0.7}
+                max={1.3}
+                step={0.05}
+                value={speechRate}
+                onChange={e => {
+                  const nextRate = Number.parseFloat(e.target.value || '0');
+                  if (Number.isNaN(nextRate)) return;
+                  const clamped = Math.min(1.3, Math.max(0.7, nextRate));
+                  setSpeechRate(clamped);
+                  invoke('set_tts_rate', { rate: clamped }).catch(console.error);
+                  saveSettings({ useSystemProxy, speechRate: clamped, shortcutCommands, shortcutCommandSettings: commandSettings });
+                }}
+              />
+            </div>
+          </div>
+
+          <div className="panel-divider" />
+
+          <div className="panel-section-header">
             <div className="panel-section-title">快捷命令</div>
           </div>
 
@@ -1044,7 +1101,7 @@ function App() {
               onClick={() => {
                 const newVal = !useSystemProxy;
                 setUseSystemProxy(newVal);
-                saveSettings({ useSystemProxy: newVal, shortcutCommands, shortcutCommandSettings: commandSettings });
+                saveSettings({ useSystemProxy: newVal, speechRate, shortcutCommands, shortcutCommandSettings: commandSettings });
               }}
               role="switch"
               aria-checked={useSystemProxy}
