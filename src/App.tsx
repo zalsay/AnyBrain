@@ -1,8 +1,15 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Plus, Trash2, X, ChevronDown, ChevronUp, Globe, RefreshCw, Home, Star } from 'lucide-react';
+import { Bot, ChevronDown, ChevronUp, Copy, Globe, Home, KeyRound, Plus, RefreshCw, SendHorizonal, Sparkles, Star, Trash2, Volume2, VolumeX, X } from 'lucide-react';
 import './App.css';
 import appLogo from '../src-tauri/icons/128x128.png';
+
+const AI_CHAT_TAB_ID = '__ai_chat_flow__';
+const AI_CHAT_TAB = {
+  id: AI_CHAT_TAB_ID,
+  name: 'AI 对话流',
+  url: ''
+};
 
 // Preload all SVG/PNG icons from the assets folder using Vite
 const iconModules = import.meta.glob('/src/assets/icons/*.{svg,png}', { eager: true, query: '?url', import: 'default' }) as Record<string, string>;
@@ -11,14 +18,13 @@ const getIconUrl = (id: string, name: string) => {
   const normalizedName = name.toLowerCase();
 
   // Custom mapping for aliases (e.g. Chatgpt -> openai)
-  let searchTerms = [normalizedId, normalizedName];
+  const searchTerms = [normalizedId, normalizedName];
   if (normalizedId.includes('chatgpt') || normalizedName.includes('chatgpt')) searchTerms.push('openai');
   if (normalizedId.includes('tongyi') || normalizedName.includes('tongyi')) searchTerms.push('qwen');
   if (normalizedName.includes('minimax') || normalizedId.includes('minimax')) searchTerms.push('minimax');
 
   for (const path in iconModules) {
     const filename = path.split('/').pop()?.toLowerCase() || '';
-    // If filename contains any of the search terms
     if (searchTerms.some(term => filename.includes(term))) {
       return iconModules[path];
     }
@@ -47,6 +53,20 @@ interface ShortcutCommandSettings {
   defaultExecMode: ExecMode;
 }
 
+interface AiProviderSettings {
+  enabled: boolean;
+  baseUrl: string;
+  apiKey: string;
+  modelId: string;
+}
+
+interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  status?: 'streaming' | 'error';
+}
+
 const EXEC_MODE_OPTIONS: Array<{ value: ExecMode; label: string }> = [
   { value: 'shell_with_output', label: '本地 shell（显示输出）' },
   { value: 'shell_status_only', label: '本地 shell（仅状态）' },
@@ -73,21 +93,29 @@ const POPULAR_PLATFORMS = [
 const STORAGE_KEY = 'ai-chaty-platforms';
 const SETTINGS_DEFAULTS = { useSystemProxy: true, speechRate: 0.9 };
 const COMMAND_SETTINGS_DEFAULTS: ShortcutCommandSettings = { defaultExecMode: 'shell_with_output' };
+const AI_PROVIDER_DEFAULTS: AiProviderSettings = {
+  enabled: false,
+  baseUrl: '',
+  apiKey: '',
+  modelId: ''
+};
+const CHAT_WELCOME_MESSAGE: ChatMessage = {
+  id: 'welcome',
+  role: 'assistant',
+  content: '你好，我已经准备好了。开启 AI 对话流后，你可以在这里直接进行多轮对话。',
+};
 
-// Try loading from Rust file first, fall back to localStorage for migration
 async function loadPlatformsAsync(): Promise<Platform[]> {
   try {
     const data: string = await invoke('load_platforms');
     const parsed = JSON.parse(data);
     if (Array.isArray(parsed) && parsed.length > 0) return parsed;
   } catch { }
-  // Fallback: migrate from localStorage
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        // Save to file backend for future use
         invoke('save_platforms', { data: saved }).catch(() => { });
         return parsed;
       }
@@ -99,7 +127,6 @@ async function loadPlatformsAsync(): Promise<Platform[]> {
 function savePlatformsToFile(platforms: Platform[]) {
   const data = JSON.stringify(platforms);
   invoke('save_platforms', { data }).catch(console.error);
-  // Also keep localStorage in sync for dev mode
   localStorage.setItem(STORAGE_KEY, data);
 }
 
@@ -119,13 +146,102 @@ function deriveNameFromUrl(value: string) {
   }
 }
 
+function joinBaseUrl(baseUrl: string) {
+  const trimmed = baseUrl.trim();
+  if (!trimmed) return '';
+  return trimmed.replace(/\/$/, '');
+}
 
-// Component to render platform favicon from local assets with fallback to website favicon
+function buildChatApiUrl(baseUrl: string) {
+  const normalized = joinBaseUrl(normalizeUrl(baseUrl));
+  if (!normalized) return '';
+  if (/\/((v\d+\/)?chat\/completions|(v\d+\/)?responses)$/.test(normalized)) return normalized;
+  if (/\/v\d+$/.test(normalized)) return `${normalized}/responses`;
+  return `${normalized}/v1/responses`;
+}
+
+function parseSseEventChunks(rawText: string) {
+  return rawText
+    .split(/\n\n+/)
+    .map(block => block
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.startsWith('data:'))
+      .map(line => line.slice(5).trim())
+      .join('\n'))
+    .filter(Boolean);
+}
+
+function extractStreamingDelta(payload: unknown) {
+  const data = payload as {
+    choices?: Array<{ delta?: { content?: string | Array<{ type?: string; text?: string }> } }>;
+    delta?: string;
+    output_text?: string;
+  };
+
+  const choiceDelta = data?.choices?.[0]?.delta?.content;
+  if (typeof choiceDelta === 'string') return choiceDelta;
+  if (Array.isArray(choiceDelta)) {
+    return choiceDelta
+      .map(item => (item?.type === 'text' || !item?.type ? item?.text ?? '' : ''))
+      .join('');
+  }
+
+  if (typeof data?.delta === 'string') return data.delta;
+  if (typeof data?.output_text === 'string') return data.output_text;
+  return '';
+}
+
+function extractErrorMessage(payload: unknown, fallback: string) {
+  if (!payload || typeof payload !== 'object') return fallback;
+  const maybePayload = payload as {
+    error?: { message?: string; code?: string | number } | string;
+    message?: string;
+    detail?: string;
+  };
+  if (typeof maybePayload.error === 'string') return maybePayload.error;
+  if (typeof maybePayload.error?.message === 'string') return maybePayload.error.message;
+  if (typeof maybePayload.message === 'string') return maybePayload.message;
+  if (typeof maybePayload.detail === 'string') return maybePayload.detail;
+  return fallback;
+}
+
+function extractAssistantReply(payload: unknown) {
+  const data = payload as {
+    choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> }; delta?: { content?: string } }>;
+    output_text?: string;
+    output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
+  };
+
+  const choiceContent = data?.choices?.[0]?.message?.content;
+  if (typeof choiceContent === 'string' && choiceContent.trim()) return choiceContent.trim();
+  if (Array.isArray(choiceContent)) {
+    const text = choiceContent
+      .map(item => (item?.type === 'text' || !item?.type ? item?.text ?? '' : ''))
+      .join('')
+      .trim();
+    if (text) return text;
+  }
+
+  const deltaContent = data?.choices?.[0]?.delta?.content;
+  if (typeof deltaContent === 'string' && deltaContent.trim()) return deltaContent.trim();
+
+  if (typeof data?.output_text === 'string' && data.output_text.trim()) return data.output_text.trim();
+
+  const outputText = data?.output
+    ?.flatMap(item => item.content ?? [])
+    .map(item => (item?.type === 'text' || !item?.type ? item?.text ?? '' : ''))
+    .join('')
+    .trim();
+  if (outputText) return outputText;
+
+  return '';
+}
+
 function PlatformIcon({ platformId, platformName, url, size = 16 }: { platformId: string; platformName: string; url?: string; size?: number }) {
   const [error, setError] = useState(false);
   const iconUrl = getIconUrl(platformId, platformName);
 
-  // If no matching local SVG/PNG was found, or if local loading failed, try fetching website favicon
   if (!iconUrl || error) {
     if (url) {
       try {
@@ -138,11 +254,10 @@ function PlatformIcon({ platformId, platformName, url, size = 16 }: { platformId
             width={size}
             height={size}
             className="platform-icon"
-            onError={() => setError(true)} // If favicon also fails, it will hit error state again
+            onError={() => setError(true)}
           />
         );
       } catch {
-        // Fallback to globe if URL is invalid
       }
     }
     return <Globe size={size} />;
@@ -156,7 +271,6 @@ function PlatformIcon({ platformId, platformName, url, size = 16 }: { platformId
       height={size}
       className="platform-icon"
       onError={() => {
-        // If local icon fails to load, the component will re-render and try the favicon/globe logic
         setError(true);
       }}
     />
@@ -182,18 +296,30 @@ function App() {
   const [commandOutputs, setCommandOutputs] = useState<Record<string, { output: string; error: string; exitCode: number | null }>>({});
   const [expandedCommandOutputs, setExpandedCommandOutputs] = useState<Record<string, boolean>>({});
   const [commandStatuses, setCommandStatuses] = useState<Record<string, 'running' | 'success' | 'error'>>({});
+  const [aiProvider, setAiProvider] = useState<AiProviderSettings>(AI_PROVIDER_DEFAULTS);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([CHAT_WELCOME_MESSAGE]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatSending, setChatSending] = useState(false);
+  const [chatError, setChatError] = useState('');
+  const [chatCopyState, setChatCopyState] = useState<Record<string, 'success' | 'error'>>({});
+  const [chatSpeakingId, setChatSpeakingId] = useState<string | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Hover state for tab actions (replacing dropdown context menu due to native webview clipping)
   const [hoveredTab, setHoveredTab] = useState<string | null>(null);
-
-  // Add form state
   const [selectedPreset, setSelectedPreset] = useState<string>('');
   const [newName, setNewName] = useState('');
   const [newUrl, setNewUrl] = useState('');
   const [quickName, setQuickName] = useState('');
   const [quickUrl, setQuickUrl] = useState('');
 
-  // Load platforms and settings from file on startup
+  const allVisibleTabs = useMemo(() => {
+    const visiblePlatforms = platforms.filter(p => !p.hidden);
+    const aiTabs = aiProvider.enabled ? [AI_CHAT_TAB] : [];
+    return [...aiTabs, ...visiblePlatforms, ...tempTabs];
+  }, [platforms, tempTabs, aiProvider.enabled]);
+
+  const isActiveAiChat = activeTab === AI_CHAT_TAB_ID;
+
   useEffect(() => {
     loadPlatformsAsync().then(loaded => {
       setPlatforms(loaded);
@@ -204,7 +330,7 @@ function App() {
       }
       setInitialized(true);
     });
-    // Load settings
+
     invoke('load_settings').then((data: unknown) => {
       try {
         const parsed = JSON.parse(data as string);
@@ -213,8 +339,10 @@ function App() {
         setSpeechRate(settings.speechRate);
         const loadedCommands = Array.isArray(parsed?.shortcutCommands) ? parsed.shortcutCommands : [];
         const loadedCommandSettings = { ...COMMAND_SETTINGS_DEFAULTS, ...(parsed?.shortcutCommandSettings || {}) };
+        const loadedAiProvider = { ...AI_PROVIDER_DEFAULTS, ...(parsed?.aiProvider || {}) };
         setShortcutCommands(loadedCommands);
         setCommandSettings(loadedCommandSettings);
+        setAiProvider(loadedAiProvider);
         setSettingsLoaded(true);
       } catch {
         setSettingsLoaded(true);
@@ -224,40 +352,37 @@ function App() {
     });
   }, []);
 
-  // Make sure we have an active tab if platforms exist but activeTab is empty
   useEffect(() => {
-    const visiblePlatforms = platforms.filter(p => !p.hidden);
-    const all = [...visiblePlatforms, ...tempTabs];
-    if (all.length > 0 && (!activeTab || (platforms.find(p => p.id === activeTab)?.hidden))) {
-      setActiveTab(all[0].id);
+    if (allVisibleTabs.length > 0 && (!activeTab || !allVisibleTabs.some(tab => tab.id === activeTab))) {
+      setActiveTab(allVisibleTabs[0].id);
     }
-  }, [platforms, tempTabs, activeTab]);
+  }, [allVisibleTabs, activeTab]);
 
-  // Save platforms whenever they change (skip initial empty state)
   useEffect(() => {
     if (initialized) {
       savePlatformsToFile(platforms);
     }
   }, [platforms, initialized]);
 
-  // Create or show webview when active tab changes (only if settings is closed)
   useEffect(() => {
     if (showSettings || !activeTab) return;
     const platform = tempTabs.find(p => p.id === activeTab) || platforms.find(p => p.id === activeTab);
+    if (activeTab === AI_CHAT_TAB_ID) {
+      invoke('hide_all_webviews').catch(console.error);
+      return;
+    }
     if (!platform) return;
     if (!platform.url || !platform.url.trim()) {
       invoke('hide_all_webviews').catch(console.error);
       return;
     }
-    if (platform) {
-      invoke('create_or_show_webview', {
-        platformId: platform.id,
-        url: platform.url,
-        topOffset: 70.0
-      })
-        .then(() => invoke('set_tts_rate', { rate: speechRate }))
-        .catch(console.error);
-    }
+    invoke('create_or_show_webview', {
+      platformId: platform.id,
+      url: platform.url,
+      topOffset: 70.0
+    })
+      .then(() => invoke('set_tts_rate', { rate: speechRate }))
+      .catch(console.error);
   }, [activeTab, platforms, tempTabs, showSettings, speechRate]);
 
   useEffect(() => {
@@ -265,7 +390,6 @@ function App() {
     invoke('set_tts_rate', { rate: speechRate }).catch(console.error);
   }, [speechRate, settingsLoaded]);
 
-  // 监听来自子 WebView 的新窗口请求，转为应用内新建临时标签
   useEffect(() => {
     const unlistenPromise = (async () => {
       // @ts-ignore: dynamic import for event APIs
@@ -285,15 +409,55 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (isActiveAiChat && !showSettings) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages, isActiveAiChat, showSettings]);
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  const saveSettings = (next: Record<string, unknown>) => {
+    invoke('save_settings', { data: JSON.stringify(next) }).catch(console.error);
+  };
+
+  const persistSettings = (overrides: Partial<{
+    useSystemProxy: boolean;
+    speechRate: number;
+    shortcutCommands: ShortcutCommand[];
+    shortcutCommandSettings: ShortcutCommandSettings;
+    aiProvider: AiProviderSettings;
+  }> = {}) => {
+    saveSettings({
+      useSystemProxy: overrides.useSystemProxy ?? useSystemProxy,
+      speechRate: overrides.speechRate ?? speechRate,
+      shortcutCommands: overrides.shortcutCommands ?? shortcutCommands,
+      shortcutCommandSettings: overrides.shortcutCommandSettings ?? commandSettings,
+      aiProvider: overrides.aiProvider ?? aiProvider,
+    });
+  };
+
+  const updateAiProvider = (partial: Partial<AiProviderSettings>) => {
+    setAiProvider(prev => {
+      const next = { ...prev, ...partial };
+      persistSettings({ aiProvider: next });
+      return next;
+    });
+  };
+
   const toggleSettings = () => {
     if (!showSettings) {
-      // Opening settings: hide all child webviews so the panel is visible
       invoke('hide_all_webviews').catch(console.error);
       setShowSettings(true);
       setShowQuickAdd(false);
       setShowCommandAddForm(false);
     } else {
-      // Closing settings: re-show the active webview
       setShowSettings(false);
       setShowAddForm(false);
       resetAddForm();
@@ -326,14 +490,10 @@ function App() {
     setCommandDraftValue('');
   };
 
-  const saveSettings = (next: Record<string, unknown>) => {
-    invoke('save_settings', { data: JSON.stringify(next) }).catch(console.error);
-  };
-
   const updateCommandSettings = (partial: Partial<ShortcutCommandSettings>) => {
     setCommandSettings(prev => {
       const next = { ...prev, ...partial };
-      saveSettings({ useSystemProxy, speechRate, shortcutCommands, shortcutCommandSettings: next });
+      persistSettings({ shortcutCommandSettings: next });
       return next;
     });
   };
@@ -341,7 +501,7 @@ function App() {
   const updateShortcutCommands = (updater: (prev: ShortcutCommand[]) => ShortcutCommand[]) => {
     setShortcutCommands(prev => {
       const next = updater(prev);
-      saveSettings({ useSystemProxy, speechRate, shortcutCommands: next, shortcutCommandSettings: commandSettings });
+      persistSettings({ shortcutCommands: next });
       return next;
     });
   };
@@ -452,7 +612,7 @@ function App() {
       setNewName('');
       setNewUrl('');
     } else {
-      const preset = POPULAR_PLATFORMS[parseInt(val)];
+      const preset = POPULAR_PLATFORMS[Number.parseInt(val, 10)];
       if (preset) {
         setNewName(preset.name);
         setNewUrl(preset.url);
@@ -460,14 +620,10 @@ function App() {
     }
   };
 
-
   const handleAddPlatform = () => {
     if (!newName.trim() || !newUrl.trim()) return;
-    const id = newName.toLowerCase().replace(/\s+/g, '-') + '-' + Date.now();
-
-    // Ensure URL has protocol
+    const id = `${newName.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
     const finalUrl = normalizeUrl(newUrl);
-
     const newPlatform: Platform = { id, name: newName.trim(), url: finalUrl };
     setPlatforms(prev => [...prev, newPlatform]);
     setShowAddForm(false);
@@ -494,7 +650,8 @@ function App() {
     setPlatforms(prev => {
       const updated = prev.filter(p => p.id !== id);
       if (activeTab === id) {
-        setActiveTab(updated.length > 0 ? updated[0].id : '');
+        const fallback = aiProvider.enabled ? AI_CHAT_TAB_ID : (updated[0]?.id || '');
+        setActiveTab(fallback);
       }
       return updated;
     });
@@ -502,6 +659,11 @@ function App() {
 
   const handleReloadPlatform = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    if (id === AI_CHAT_TAB_ID) {
+      setChatMessages([CHAT_WELCOME_MESSAGE]);
+      setChatError('');
+      return;
+    }
     const platform = tempTabs.find(p => p.id === id) || platforms.find(p => p.id === id);
     if (!platform) return;
     const isExternal = platform.url?.startsWith('http');
@@ -527,23 +689,28 @@ function App() {
 
   const handleCloseTab = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    if (id === AI_CHAT_TAB_ID) {
+      updateAiProvider({ enabled: false });
+      const fallback = platforms.filter(p => !p.hidden)[0]?.id || tempTabs[0]?.id || '';
+      setActiveTab(fallback);
+      return;
+    }
     invoke('destroy_webview', { platformId: id }).catch(console.error);
     const isTemp = tempTabs.some(p => p.id === id);
     if (isTemp) {
       const tempAfter = tempTabs.filter(p => p.id !== id);
       if (activeTab === id) {
-        const combined = [...platforms, ...tempAfter];
+        const combined = [...(aiProvider.enabled ? [AI_CHAT_TAB] : []), ...platforms.filter(p => !p.hidden), ...tempAfter];
         setActiveTab(combined.length ? combined[0].id : '');
       }
       setTempTabs(tempAfter);
       return;
     }
-    // For fixed platforms, we just hide them
     setPlatforms(prev => {
       const updated = prev.map(p => p.id === id ? { ...p, hidden: true } : p);
       if (activeTab === id) {
         const visibleAfter = updated.filter(p => !p.hidden);
-        const combined = [...visibleAfter, ...tempTabs];
+        const combined = [...(aiProvider.enabled ? [AI_CHAT_TAB] : []), ...visibleAfter, ...tempTabs];
         setActiveTab(combined.length ? combined[0].id : '');
       }
       return updated;
@@ -555,11 +722,190 @@ function App() {
   };
 
   const handleMenuSaveToFavorites = (platform: Platform) => {
-    // move from temp tabs to platforms
     const p = { ...platform, id: platform.id.replace('tmp-', 'fixed-') };
     setPlatforms(prev => [...prev, p]);
     setTempTabs(prev => prev.filter(t => t.id !== platform.id));
     setActiveTab(p.id);
+  };
+
+  const handleCopyMessage = async (messageId: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setChatCopyState(prev => ({ ...prev, [messageId]: 'success' }));
+    } catch {
+      setChatCopyState(prev => ({ ...prev, [messageId]: 'error' }));
+    } finally {
+      window.setTimeout(() => {
+        setChatCopyState(prev => {
+          const next = { ...prev };
+          delete next[messageId];
+          return next;
+        });
+      }, 1600);
+    }
+  };
+
+  const handleSpeakMessage = (messageId: string, content: string) => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      setChatError('当前环境不支持浏览器朗读。');
+      return;
+    }
+
+    const synth = window.speechSynthesis;
+    const text = content.trim();
+    if (!text) return;
+
+    if (chatSpeakingId === messageId) {
+      synth.cancel();
+      setChatSpeakingId(null);
+      return;
+    }
+
+    synth.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = Math.min(Math.max(speechRate, 0.5), 2);
+    utterance.lang = 'zh-CN';
+    utterance.onend = () => setChatSpeakingId((current: string | null) => (current === messageId ? null : current));
+    utterance.onerror = () => {
+      setChatSpeakingId((current: string | null) => (current === messageId ? null : current));
+      setChatError('朗读失败，请检查浏览器语音能力是否可用。');
+    };
+
+    setChatError('');
+    setChatSpeakingId(messageId);
+    synth.speak(utterance);
+  };
+
+  const handleSendChat = async () => {
+    if (chatSending) return;
+    if (!aiProvider.enabled) {
+      setChatError('请先在设置中开启 AI 对话流。');
+      return;
+    }
+    if (!aiProvider.baseUrl.trim() || !aiProvider.apiKey.trim() || !aiProvider.modelId.trim()) {
+      setChatError('请先在设置中配置 baseUrl、apiKey 与 modelId。');
+      return;
+    }
+    const content = chatInput.trim();
+    if (!content) return;
+
+    const userMessage: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content,
+    };
+    const assistantId = `assistant-${Date.now()}`;
+    const assistantPlaceholder: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '正在思考中…',
+      status: 'streaming'
+    };
+
+    const nextMessages = [...chatMessages, userMessage];
+    setChatMessages([...nextMessages, assistantPlaceholder]);
+    setChatInput('');
+    setChatSending(true);
+    setChatError('');
+
+    try {
+      const apiUrl = buildChatApiUrl(aiProvider.baseUrl);
+      if (!apiUrl) {
+        throw new Error('Base URL 无效，请检查设置。');
+      }
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${aiProvider.apiKey.trim()}`,
+        },
+        body: JSON.stringify({
+          model: aiProvider.modelId.trim(),
+          input: nextMessages.map(message => ({
+            role: message.role,
+            content: [
+              {
+                type: 'input_text',
+                text: message.content,
+              }
+            ]
+          })),
+          stream: true,
+          temperature: 0.7,
+        })
+      });
+
+      const contentType = response.headers.get('content-type') || '';
+      const rawText = await response.text();
+      console.log('[AnyBrain][AI] response meta', {
+        url: apiUrl,
+        status: response.status,
+        ok: response.ok,
+        contentType,
+      });
+      console.log('[AnyBrain][AI] raw response preview', rawText.slice(0, 2000));
+
+      const isSseResponse = contentType.includes('text/event-stream') || rawText.includes('data:');
+      let payload: unknown = null;
+      let reply = '';
+
+      if (isSseResponse) {
+        const events = parseSseEventChunks(rawText);
+        console.log('[AnyBrain][AI] parsed sse events', events.slice(0, 20));
+
+        for (const eventData of events) {
+          if (eventData === '[DONE]') break;
+          try {
+            const eventPayload = JSON.parse(eventData) as unknown;
+            const delta = extractStreamingDelta(eventPayload);
+            if (delta) {
+              reply += delta;
+              setChatMessages(prev => prev.map(message => (
+                message.id === assistantId
+                  ? { ...message, content: reply, status: 'streaming' }
+                  : message
+              )));
+            } else {
+              console.log('[AnyBrain][AI] empty sse chunk', eventPayload);
+            }
+            payload = eventPayload;
+          } catch (parseError) {
+            console.warn('[AnyBrain][AI] failed to parse sse chunk', eventData, parseError);
+          }
+        }
+      } else {
+        try {
+          payload = rawText ? JSON.parse(rawText) : null;
+        } catch {
+          payload = rawText;
+        }
+        reply = typeof payload === 'string'
+          ? payload.trim()
+          : extractAssistantReply(payload);
+      }
+
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, rawText || `请求失败（${response.status}）`));
+      }
+
+      setChatMessages(prev => prev.map(message => (
+        message.id === assistantId
+          ? { ...message, content: reply || '接口已返回，但未获取到有效内容。', status: undefined }
+          : message
+      )));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setChatError(message);
+      setChatMessages(prev => prev.map(item => (
+        item.id === assistantId
+          ? { ...item, content: `请求失败：${message}`, status: 'error' }
+          : item
+      )));
+    } finally {
+      setChatSending(false);
+    }
   };
 
   return (
@@ -569,6 +915,38 @@ function App() {
           <button className="icon-button settings-logo-btn" onClick={toggleSettings} aria-label="设置">
             <img src={appLogo} alt="Brainer Logo" className="app-logo-small" />
           </button>
+
+          {aiProvider.enabled && (
+            <div
+              key={AI_CHAT_TAB.id}
+              className={`tab-button ai-tab-button ${activeTab === AI_CHAT_TAB.id ? 'active' : ''}`}
+              onClick={() => setActiveTab(AI_CHAT_TAB.id)}
+            >
+              {activeTab === AI_CHAT_TAB.id && (
+                <button
+                  className="tab-refresh-btn tab-refresh-left"
+                  onClick={(e) => handleReloadPlatform(e, AI_CHAT_TAB.id)}
+                  title="清空对话"
+                  aria-label="清空对话"
+                >
+                  <RefreshCw size={14} />
+                </button>
+              )}
+              <div className="tab-info">
+                <Sparkles size={16} className="ai-tab-icon" />
+                <span className="tab-name-text">{AI_CHAT_TAB.name}</span>
+              </div>
+              <button
+                className="tab-close-btn"
+                onClick={(e) => handleCloseTab(e, AI_CHAT_TAB.id)}
+                title="关闭"
+                aria-label="关闭 AI 对话流"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          )}
+
           {platforms.filter(p => !p.hidden).map((platform) => (
             <div
               key={platform.id}
@@ -613,9 +991,11 @@ function App() {
               </button>
             </div>
           ))}
+
           {platforms.filter(p => !p.hidden).length > 0 && tempTabs.length > 0 && (
             <div className="tab-divider" aria-hidden="true" />
           )}
+
           {tempTabs.map((platform) => (
             <div
               key={platform.id}
@@ -734,7 +1114,7 @@ function App() {
                       if (currentTemp && (!currentTemp.url || !currentTemp.url.trim())) {
                         setTempTabs(prev => {
                           const updated = prev.filter(p => p.id !== activeTab);
-                          const next = [...platforms, ...updated];
+                          const next = [...(aiProvider.enabled ? [AI_CHAT_TAB] : []), ...platforms, ...updated];
                           setActiveTab(next.length ? next[0].id : '');
                           return updated;
                         });
@@ -768,10 +1148,81 @@ function App() {
           </div>
         </div>
 
-        <div className="titlebar-actions">
-          {/* Settings button moved to the left */}
-        </div>
+        <div className="titlebar-actions" />
       </div>
+
+      {isActiveAiChat && !showSettings && (
+        <main className="ai-chat-shell">
+          <section className="ai-chat-panel">
+            <header className="ai-chat-panel-header">
+              <div>
+                <h2>对话流</h2>
+                <p>{aiProvider.enabled ? '已开启，可直接发送消息。' : '请先在设置中开启 AI 对话流。'}</p>
+              </div>
+              <button className="ai-chat-reset" onClick={() => { setChatMessages([CHAT_WELCOME_MESSAGE]); setChatError(''); }}>
+                清空对话
+              </button>
+            </header>
+
+            <div className="ai-chat-messages">
+              {chatMessages.map(message => (
+                <article key={message.id} className={`ai-chat-message ${message.role} ${message.status === 'error' ? 'is-error' : ''}`}>
+                  <div className="ai-chat-avatar">
+                    {message.role === 'assistant' ? <Bot size={16} /> : <span>你</span>}
+                  </div>
+                  <div className="ai-chat-bubble-wrap">
+                    <div className="ai-chat-bubble">
+                      <div className="ai-chat-content">{message.content}</div>
+                    </div>
+                    <div className="ai-chat-bubble-actions">
+                      <button
+                        className={`ai-chat-copy-btn ${chatCopyState[message.id] ? `is-${chatCopyState[message.id]}` : ''}`}
+                        onClick={() => void handleCopyMessage(message.id, message.content)}
+                        title={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
+                        aria-label={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
+                      >
+                        <Copy size={14} />
+                      </button>
+                      <button
+                        className={`ai-chat-copy-btn ${chatSpeakingId === message.id ? 'is-speaking' : ''}`}
+                        onClick={() => handleSpeakMessage(message.id, message.content)}
+                        title={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
+                        aria-label={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
+                      >
+                        {chatSpeakingId === message.id ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                      </button>
+                    </div>
+                  </div>
+                </article>
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+
+            <div className="ai-chat-composer">
+              {chatError && <div className="ai-chat-error">{chatError}</div>}
+              <textarea
+                className="ai-chat-textarea"
+                placeholder="输入你的问题，回车发送，Shift + 回车换行"
+                value={chatInput}
+                onChange={e => setChatInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    void handleSendChat();
+                  }
+                }}
+              />
+              <div className="ai-chat-actions">
+                <div className="ai-chat-hint">支持兼容 OpenAI Chat Completions 的接口</div>
+                <button className="ai-chat-send" disabled={chatSending || !chatInput.trim()} onClick={() => void handleSendChat()}>
+                  <SendHorizonal size={16} />
+                  <span>{chatSending ? '发送中...' : '发送'}</span>
+                </button>
+              </div>
+            </div>
+          </section>
+        </main>
+      )}
 
       <div
         className={`tab-add-backdrop ${showQuickAdd ? 'open' : ''}`}
@@ -782,20 +1233,18 @@ function App() {
           if (currentTemp && (!currentTemp.url || !currentTemp.url.trim())) {
             setTempTabs(prev => {
               const updated = prev.filter(p => p.id !== activeTab);
-              const next = [...platforms, ...updated];
+              const next = [...(aiProvider.enabled ? [AI_CHAT_TAB] : []), ...platforms, ...updated];
               setActiveTab(next.length ? next[0].id : '');
               return updated;
             });
           }
         }}
-
       />
 
-      {/* Settings Slide-in Panel + Backdrop */}
       <div className={`settings-backdrop ${showSettings ? 'open' : ''}`} onClick={toggleSettings} />
       <div className={`settings-panel ${showSettings ? 'open' : ''}`}>
         <div className="panel-header">
-          <h3>管理标签页</h3>
+          <h3>管理标签页与能力设置</h3>
           <button className="icon-button" onClick={toggleSettings}>
             <X size={18} />
           </button>
@@ -918,6 +1367,85 @@ function App() {
           <div className="panel-divider" />
 
           <div className="panel-section-header">
+            <div className="panel-section-title">AI 对话流</div>
+          </div>
+
+          <div className="panel-ai-card">
+            <div className="panel-ai-card-row">
+              <div>
+                <div className="panel-ai-title">开启 AI 对话页</div>
+                <div className="panel-ai-desc">打开后会在顶部新增一个独立的现代感 AI 对话流页面。</div>
+              </div>
+              <button
+                className={`toggle-switch ${aiProvider.enabled ? 'active' : ''}`}
+                onClick={() => {
+                  const enabled = !aiProvider.enabled;
+                  updateAiProvider({ enabled });
+                  if (enabled) {
+                    setActiveTab(AI_CHAT_TAB_ID);
+                    invoke('hide_all_webviews').catch(console.error);
+                  } else if (activeTab === AI_CHAT_TAB_ID) {
+                    const fallback = platforms.filter(p => !p.hidden)[0]?.id || tempTabs[0]?.id || '';
+                    setActiveTab(fallback);
+                  }
+                }}
+                role="switch"
+                aria-checked={aiProvider.enabled}
+              >
+                <span className="toggle-knob" />
+              </button>
+            </div>
+
+            <div className="panel-ai-grid">
+              <label className="panel-ai-field">
+                <span>Base URL</span>
+                <div className="panel-ai-input-wrap">
+                  <Globe size={14} />
+                  <input
+                    className="add-input panel-ai-input"
+                    placeholder="如 https://api.openai.com/v1"
+                    value={aiProvider.baseUrl}
+                    onChange={e => updateAiProvider({ baseUrl: e.target.value })}
+                  />
+                </div>
+              </label>
+
+              <label className="panel-ai-field">
+                <span>API Key</span>
+                <div className="panel-ai-input-wrap">
+                  <KeyRound size={14} />
+                  <input
+                    className="add-input panel-ai-input"
+                    type="password"
+                    placeholder="输入你的 API Key"
+                    value={aiProvider.apiKey}
+                    onChange={e => updateAiProvider({ apiKey: e.target.value })}
+                  />
+                </div>
+              </label>
+
+              <label className="panel-ai-field">
+                <span>Model ID</span>
+                <div className="panel-ai-input-wrap">
+                  <Bot size={14} />
+                  <input
+                    className="add-input panel-ai-input"
+                    placeholder="如 gpt-4.1-mini / deepseek-chat"
+                    value={aiProvider.modelId}
+                    onChange={e => updateAiProvider({ modelId: e.target.value })}
+                  />
+                </div>
+              </label>
+            </div>
+
+            <div className="panel-ai-tips">
+              保存方式为自动持久化；推荐填写兼容 OpenAI Chat Completions 的接口地址。
+            </div>
+          </div>
+
+          <div className="panel-divider" />
+
+          <div className="panel-section-header">
             <div className="panel-section-title">语音朗读</div>
           </div>
 
@@ -935,7 +1463,7 @@ function App() {
                   const nextRate = Number.parseFloat(e.target.value);
                   setSpeechRate(nextRate);
                   invoke('set_tts_rate', { rate: nextRate }).catch(console.error);
-                  saveSettings({ useSystemProxy, speechRate: nextRate, shortcutCommands, shortcutCommandSettings: commandSettings });
+                  persistSettings({ speechRate: nextRate });
                 }}
               />
               <input
@@ -951,7 +1479,7 @@ function App() {
                   const clamped = Math.min(1.3, Math.max(0.7, nextRate));
                   setSpeechRate(clamped);
                   invoke('set_tts_rate', { rate: clamped }).catch(console.error);
-                  saveSettings({ useSystemProxy, speechRate: clamped, shortcutCommands, shortcutCommandSettings: commandSettings });
+                  persistSettings({ speechRate: clamped });
                 }}
               />
             </div>
@@ -1101,7 +1629,7 @@ function App() {
               onClick={() => {
                 const newVal = !useSystemProxy;
                 setUseSystemProxy(newVal);
-                saveSettings({ useSystemProxy: newVal, speechRate, shortcutCommands, shortcutCommandSettings: commandSettings });
+                persistSettings({ useSystemProxy: newVal });
               }}
               role="switch"
               aria-checked={useSystemProxy}
