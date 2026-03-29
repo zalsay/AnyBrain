@@ -156,8 +156,46 @@ function buildChatApiUrl(baseUrl: string) {
   const normalized = joinBaseUrl(normalizeUrl(baseUrl));
   if (!normalized) return '';
   if (/\/((v\d+\/)?chat\/completions|(v\d+\/)?responses)$/.test(normalized)) return normalized;
+  if (/\/v\d+$/.test(normalized)) return `${normalized}/chat/completions`;
+  return `${normalized}/v1/chat/completions`;
+}
+
+function buildResponsesApiUrl(baseUrl: string) {
+  const normalized = joinBaseUrl(normalizeUrl(baseUrl));
+  if (!normalized) return '';
+  if (/\/(v\d+\/)?responses$/.test(normalized)) return normalized;
+  if (/\/(v\d+\/)?chat\/completions$/.test(normalized)) return normalized.replace(/chat\/completions$/, 'responses');
   if (/\/v\d+$/.test(normalized)) return `${normalized}/responses`;
   return `${normalized}/v1/responses`;
+}
+
+function buildChatCompletionsPayload(messages: ChatMessage[], model: string) {
+  return {
+    model,
+    messages: messages.map(message => ({
+      role: message.role,
+      content: message.content,
+    })),
+    stream: true,
+    temperature: 0.7,
+  };
+}
+
+function buildResponsesPayload(messages: ChatMessage[], model: string) {
+  return {
+    model,
+    input: messages.map(message => ({
+      role: message.role,
+      content: [
+        {
+          type: 'input_text',
+          text: message.content,
+        }
+      ]
+    })),
+    stream: true,
+    temperature: 0.7,
+  };
 }
 
 function parseSseEventChunks(rawText: string) {
@@ -810,89 +848,122 @@ function App() {
     setChatError('');
 
     try {
-      const apiUrl = buildChatApiUrl(aiProvider.baseUrl);
-      if (!apiUrl) {
+      const completionUrl = buildChatApiUrl(aiProvider.baseUrl);
+      const responsesUrl = buildResponsesApiUrl(aiProvider.baseUrl);
+      const baseHeaders = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${aiProvider.apiKey.trim()}`,
+      };
+
+      if (!completionUrl) {
         throw new Error('Base URL 无效，请检查设置。');
       }
 
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${aiProvider.apiKey.trim()}`,
-        },
-        body: JSON.stringify({
-          model: aiProvider.modelId.trim(),
-          input: nextMessages.map(message => ({
-            role: message.role,
-            content: [
-              {
-                type: 'input_text',
-                text: message.content,
-              }
-            ]
-          })),
-          stream: true,
-          temperature: 0.7,
-        })
-      });
-
-      const contentType = response.headers.get('content-type') || '';
-      const rawText = await response.text();
-      console.log('[AnyBrain][AI] response meta', {
-        url: apiUrl,
-        status: response.status,
-        ok: response.ok,
-        contentType,
-      });
-      console.log('[AnyBrain][AI] raw response preview', rawText.slice(0, 2000));
-
-      const isSseResponse = contentType.includes('text/event-stream') || rawText.includes('data:');
-      let payload: unknown = null;
-      let reply = '';
-
-      if (isSseResponse) {
-        const events = parseSseEventChunks(rawText);
-        console.log('[AnyBrain][AI] parsed sse events', events.slice(0, 20));
-
-        for (const eventData of events) {
-          if (eventData === '[DONE]') break;
-          try {
-            const eventPayload = JSON.parse(eventData) as unknown;
-            const delta = extractStreamingDelta(eventPayload);
-            if (delta) {
-              reply += delta;
-              setChatMessages(prev => prev.map(message => (
-                message.id === assistantId
-                  ? { ...message, content: reply, status: 'streaming' }
-                  : message
-              )));
-            } else {
-              console.log('[AnyBrain][AI] empty sse chunk', eventPayload);
-            }
-            payload = eventPayload;
-          } catch (parseError) {
-            console.warn('[AnyBrain][AI] failed to parse sse chunk', eventData, parseError);
+      const rawBaseUrl = joinBaseUrl(normalizeUrl(aiProvider.baseUrl));
+      const preferResponses = /\/(v\d+\/)?responses$/.test(rawBaseUrl);
+      const requestPlans = preferResponses
+        ? [
+          {
+            label: 'responses',
+            url: responsesUrl,
+            body: buildResponsesPayload(nextMessages, aiProvider.modelId.trim()),
+          },
+          {
+            label: 'chat_completions',
+            url: completionUrl,
+            body: buildChatCompletionsPayload(nextMessages, aiProvider.modelId.trim()),
           }
-        }
-      } else {
+        ]
+        : [
+          {
+            label: 'chat_completions',
+            url: completionUrl,
+            body: buildChatCompletionsPayload(nextMessages, aiProvider.modelId.trim()),
+          }
+        ];
+
+      let reply = '';
+      let handled = false;
+      let lastError = '';
+
+      for (const plan of requestPlans) {
+        if (!plan.url) continue;
         try {
-          payload = rawText ? JSON.parse(rawText) : null;
-        } catch {
-          payload = rawText;
+          const response = await fetch(plan.url, {
+            method: 'POST',
+            headers: baseHeaders,
+            body: JSON.stringify(plan.body)
+          });
+
+          const contentType = response.headers.get('content-type') || '';
+          const rawText = await response.text();
+          console.log('[AnyBrain][AI] response meta', {
+            mode: plan.label,
+            url: plan.url,
+            status: response.status,
+            ok: response.ok,
+            contentType,
+          });
+          console.log('[AnyBrain][AI] raw response preview', rawText.slice(0, 2000));
+
+          const isSseResponse = contentType.includes('text/event-stream') || rawText.includes('data:');
+          let payload: unknown = null;
+          let currentReply = '';
+
+          if (isSseResponse) {
+            const events = parseSseEventChunks(rawText);
+            console.log('[AnyBrain][AI] parsed sse events', events.slice(0, 20));
+
+            for (const eventData of events) {
+              if (eventData === '[DONE]') break;
+              try {
+                const eventPayload = JSON.parse(eventData) as unknown;
+                const delta = extractStreamingDelta(eventPayload);
+                if (delta) {
+                  currentReply += delta;
+                  setChatMessages(prev => prev.map(message => (
+                    message.id === assistantId
+                      ? { ...message, content: currentReply, status: 'streaming' }
+                      : message
+                  )));
+                }
+                payload = eventPayload;
+              } catch (parseError) {
+                console.warn('[AnyBrain][AI] failed to parse sse chunk', eventData, parseError);
+              }
+            }
+          } else {
+            try {
+              payload = rawText ? JSON.parse(rawText) : null;
+            } catch {
+              payload = rawText;
+            }
+            currentReply = typeof payload === 'string'
+              ? payload.trim()
+              : extractAssistantReply(payload);
+          }
+
+          if (!response.ok) {
+            const detail = extractErrorMessage(payload, rawText || `请求失败（${response.status}）`);
+            throw new Error(`HTTP ${response.status}: ${detail}`);
+          }
+
+          reply = currentReply || '接口已返回，但未获取到有效内容。';
+          handled = true;
+          break;
+        } catch (requestError) {
+          lastError = requestError instanceof Error ? requestError.message : String(requestError);
+          console.warn('[AnyBrain][AI] request failed', { mode: plan.label, url: plan.url, error: lastError });
         }
-        reply = typeof payload === 'string'
-          ? payload.trim()
-          : extractAssistantReply(payload);
       }
 
-      if (!response.ok) {
-        throw new Error(extractErrorMessage(payload, rawText || `请求失败（${response.status}）`));
+      if (!handled) {
+        throw new Error(lastError || '请求失败，请检查模型接口配置。');
       }
 
       setChatMessages(prev => prev.map(message => (
         message.id === assistantId
-          ? { ...message, content: reply || '接口已返回，但未获取到有效内容。', status: undefined }
+          ? { ...message, content: reply, status: undefined }
           : message
       )));
     } catch (error) {
@@ -1152,77 +1223,112 @@ function App() {
       </div>
 
       {isActiveAiChat && !showSettings && (
-        <main className="ai-chat-shell">
-          <section className="ai-chat-panel">
-            <header className="ai-chat-panel-header">
-              <div>
-                <h2>对话流</h2>
-                <p>{aiProvider.enabled ? '已开启，可直接发送消息。' : '请先在设置中开启 AI 对话流。'}</p>
-              </div>
-              <button className="ai-chat-reset" onClick={() => { setChatMessages([CHAT_WELCOME_MESSAGE]); setChatError(''); }}>
-                清空对话
-              </button>
-            </header>
-
-            <div className="ai-chat-messages">
-              {chatMessages.map(message => (
-                <article key={message.id} className={`ai-chat-message ${message.role} ${message.status === 'error' ? 'is-error' : ''}`}>
-                  <div className="ai-chat-avatar">
-                    {message.role === 'assistant' ? <Bot size={16} /> : <span>你</span>}
-                  </div>
-                  <div className="ai-chat-bubble-wrap">
-                    <div className="ai-chat-bubble">
-                      <div className="ai-chat-content">{message.content}</div>
+        <main className="ai-workbuddy-shell ai-workbuddy-shell-single">
+          <section className="ai-workbuddy-main">
+            <div className="ai-workbuddy-scroll">
+              <div className="ai-workbuddy-stream">
+                {chatMessages.map(message => (
+                  <article key={message.id} className={`ai-workbuddy-message ${message.role} ${message.status === 'error' ? 'is-error' : ''}`}>
+                    <div className="ai-workbuddy-message-meta">
+                      <div className="ai-workbuddy-avatar">
+                        {message.role === 'assistant' ? <Bot size={16} /> : <span>你</span>}
+                      </div>
+                      <div className="ai-workbuddy-meta-text">
+                        <span className="ai-workbuddy-role">{message.role === 'assistant' ? 'AnyBrain' : '你'}</span>
+                        <span className="ai-workbuddy-time">{message.status === 'streaming' ? '思考中' : message.status === 'error' ? '请求失败' : '刚刚'}</span>
+                      </div>
                     </div>
-                    <div className="ai-chat-bubble-actions">
+
+                    <div className="ai-workbuddy-bubble-shell">
+                      <div className="ai-workbuddy-bubble-glow" />
+                      <div className="ai-workbuddy-bubble">
+                        <div className="ai-workbuddy-content">{message.content}</div>
+                      </div>
+                    </div>
+
+                    <div className="ai-workbuddy-actions">
                       <button
-                        className={`ai-chat-copy-btn ${chatCopyState[message.id] ? `is-${chatCopyState[message.id]}` : ''}`}
+                        className={`ai-workbuddy-action-btn ${chatCopyState[message.id] ? `is-${chatCopyState[message.id]}` : ''}`}
                         onClick={() => void handleCopyMessage(message.id, message.content)}
                         title={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
                         aria-label={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
                       >
                         <Copy size={14} />
+                        <span>{chatCopyState[message.id] === 'success' ? '已复制' : '复制'}</span>
                       </button>
                       <button
-                        className={`ai-chat-copy-btn ${chatSpeakingId === message.id ? 'is-speaking' : ''}`}
+                        className={`ai-workbuddy-action-btn ${chatSpeakingId === message.id ? 'is-speaking' : ''}`}
                         onClick={() => handleSpeakMessage(message.id, message.content)}
                         title={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
                         aria-label={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
                       >
                         {chatSpeakingId === message.id ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                        <span>{chatSpeakingId === message.id ? '停止' : '朗读'}</span>
                       </button>
                     </div>
-                  </div>
-                </article>
-              ))}
-              <div ref={messagesEndRef} />
-            </div>
-
-            <div className="ai-chat-composer">
-              {chatError && <div className="ai-chat-error">{chatError}</div>}
-              <textarea
-                className="ai-chat-textarea"
-                placeholder="输入你的问题，回车发送，Shift + 回车换行"
-                value={chatInput}
-                onChange={e => setChatInput(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    void handleSendChat();
-                  }
-                }}
-              />
-              <div className="ai-chat-actions">
-                <div className="ai-chat-hint">支持兼容 OpenAI Chat Completions 的接口</div>
-                <button className="ai-chat-send" disabled={chatSending || !chatInput.trim()} onClick={() => void handleSendChat()}>
-                  <SendHorizonal size={16} />
-                  <span>{chatSending ? '发送中...' : '发送'}</span>
-                </button>
+                  </article>
+                ))}
+                <div ref={messagesEndRef} />
               </div>
             </div>
+
+            <footer className="ai-workbuddy-composer-wrap">
+              <div className="ai-workbuddy-composer">
+                <div className="ai-workbuddy-composer-top">
+                  <div className="ai-workbuddy-composer-icons">
+                    <button className="ai-workbuddy-icon-btn" type="button" onClick={toggleSettings} title="模型配置">
+                      <Bot size={16} />
+                    </button>
+                    <button className="ai-workbuddy-icon-btn" type="button" onClick={toggleSettings} title="能力设置">
+                      <KeyRound size={16} />
+                    </button>
+                  </div>
+                  <button
+                    className="ai-workbuddy-reset"
+                    onClick={() => {
+                      setChatMessages([CHAT_WELCOME_MESSAGE]);
+                      setChatError('');
+                    }}
+                  >
+                    <RefreshCw size={14} />
+                    <span>清空对话</span>
+                  </button>
+                </div>
+
+                {chatError && <div className="ai-workbuddy-error">{chatError}</div>}
+
+                <div className="ai-workbuddy-input-row">
+                  <textarea
+                    className="ai-workbuddy-textarea"
+                    placeholder="给 AnyBrain 发送消息…"
+                    value={chatInput}
+                    onChange={e => setChatInput(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        void handleSendChat();
+                      }
+                    }}
+                  />
+                </div>
+
+                <div className="ai-workbuddy-composer-bottom">
+                  <div className="ai-workbuddy-model-pill">
+                    <Bot size={14} />
+                    <span>{aiProvider.modelId.trim() || '未配置模型'}</span>
+                  </div>
+                  <button className="ai-workbuddy-send" disabled={chatSending || !chatInput.trim()} onClick={() => void handleSendChat()}>
+                    <SendHorizonal size={16} />
+                  </button>
+                </div>
+              </div>
+
+              <p className="ai-workbuddy-disclaimer">AnyBrain 可能偶尔会产生不准确的信息，重要内容请注意核实。</p>
+            </footer>
           </section>
         </main>
       )}
+
 
       <div
         className={`tab-add-backdrop ${showQuickAdd ? 'open' : ''}`}

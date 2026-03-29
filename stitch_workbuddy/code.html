@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>WorkBuddy AI - Session</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&amp;family=Manrope:wght@300;400;500;600;700&amp;family=Inter:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "secondary": "#9c9f9a",
+              "on-primary-fixed": "#004a29",
+              "primary-container": "#00522f",
+              "tertiary": "#e7fff1",
+              "primary-fixed": "#56ffa7",
+              "surface-container-lowest": "#000000",
+              "on-secondary-fixed": "#3d403d",
+              "inverse-surface": "#fcf9f8",
+              "surface-dim": "#0e0e0e",
+              "tertiary-dim": "#cdf0de",
+              "on-tertiary-fixed-variant": "#4d6d5e",
+              "on-error": "#490106",
+              "on-surface-variant": "#acabaa",
+              "outline-variant": "#484848",
+              "on-primary-fixed-variant": "#00693d",
+              "surface-container-low": "#131313",
+              "on-background": "#e7e5e4",
+              "surface-container": "#191a1a",
+              "secondary-fixed": "#e1e3de",
+              "on-secondary-fixed-variant": "#595c59",
+              "on-primary": "#004b2a",
+              "surface-container-high": "#1f2020",
+              "outline": "#767575",
+              "on-tertiary": "#466557",
+              "secondary-fixed-dim": "#d3d5d0",
+              "surface-tint": "#00e38a",
+              "surface-container-highest": "#252626",
+              "error-dim": "#bb5551",
+              "error-container": "#7f2927",
+              "tertiary-container": "#d0f3e1",
+              "tertiary-fixed-dim": "#cbeddb",
+              "on-primary-container": "#00ee91",
+              "surface-variant": "#252626",
+              "background": "#0e0e0e",
+              "error": "#ee7d77",
+              "surface": "#0e0e0e",
+              "on-secondary-container": "#bec0bb",
+              "surface-bright": "#2c2c2c",
+              "secondary-dim": "#9c9f9a",
+              "on-error-container": "#ff9993",
+              "tertiary-fixed": "#d9fce9",
+              "primary": "#00e38a",
+              "primary-dim": "#00d380",
+              "on-tertiary-fixed": "#315042",
+              "on-secondary": "#1e211e",
+              "on-surface": "#e7e5e4",
+              "primary-fixed-dim": "#00f394",
+              "inverse-primary": "#006d40",
+              "secondary-container": "#393c39",
+              "inverse-on-surface": "#565555",
+              "on-tertiary-container": "#3e5d4f"
+            },
+            fontFamily: {
+              "headline": ["Space Grotesk"],
+              "body": ["Manrope"],
+              "label": ["Inter"]
+            },
+            borderRadius: {"DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px"},
+          },
+        },
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            display: inline-block;
+            vertical-align: middle;
+        }
+        ::-webkit-scrollbar {
+            width: 4px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #252626;
+            border-radius: 10px;
+        }
+        .neon-glow {
+            text-shadow: 0 0 10px rgba(0, 227, 138, 0.4);
+        }
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+        .mask-gradient {
+            mask-image: linear-gradient(to right, black 85%, transparent 100%);
+        }
+        @keyframes pulse-dot {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.4); opacity: 0.5; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .animate-pulse-dot {
+            animation: pulse-dot 2s infinite;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-surface font-body overflow-hidden">
+<!-- Sidebar Container -->
+<aside class="h-screen w-64 flex-col fixed left-0 top-0 bg-[#0e0e0e] border-r border-white/5 z-50 flex py-6 overflow-y-auto">
+<!-- Brand Header -->
+<div class="px-6 mb-8">
+<h1 class="font-['Space_Grotesk'] font-bold text-[#00e38a] tracking-widest uppercase text-xl">WorkBuddy</h1>
+<p class="font-['Manrope'] text-[10px] text-zinc-500 tracking-[0.2em] uppercase mt-1">The Neon Monolith</p>
+</div>
+<!-- CTA Action -->
+<div class="px-4 mb-8">
+<button class="w-full flex items-center justify-center gap-2 bg-[#00e38a] text-[#004b2a] font-label font-bold py-3 rounded-xl transition-all active:scale-95 hover:bg-[#00d380] shadow-[0_0_20px_rgba(0,227,138,0.15)]">
+<span class="material-symbols-outlined text-xl">add</span>
+<span>New Session</span>
+</button>
+</div>
+<!-- Navigation Clusters -->
+<nav class="flex-1 space-y-1">
+<a class="flex items-center gap-3 px-4 py-3 bg-zinc-800/30 text-[#00e38a] border-l-2 border-[#00e38a] font-label" href="#">
+<span class="material-symbols-outlined">home</span>
+<span>Home</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-zinc-400 font-['Manrope'] hover:bg-zinc-800/50 transition-colors duration-200 hover:text-zinc-100" href="#">
+<span class="material-symbols-outlined">folder_open</span>
+<span>Projects</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-zinc-400 font-['Manrope'] hover:bg-zinc-800/50 transition-colors duration-200 hover:text-zinc-100" href="#">
+<span class="material-symbols-outlined">psychology</span>
+<span>Experts</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-zinc-400 font-['Manrope'] hover:bg-zinc-800/50 transition-colors duration-200 hover:text-zinc-100" href="#">
+<span class="material-symbols-outlined">bolt</span>
+<span>Skills</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-zinc-400 font-['Manrope'] hover:bg-zinc-800/50 transition-colors duration-200 hover:text-zinc-100" href="#">
+<span class="material-symbols-outlined">auto_mode</span>
+<span>Automation</span>
+</a>
+<!-- Sub-Folder Section -->
+<div class="mt-8 px-6 pb-2 text-[10px] font-bold text-zinc-600 uppercase tracking-widest">Workspace Content</div>
+<a class="flex items-center gap-3 px-4 py-2 text-zinc-500 font-['Manrope'] hover:text-zinc-200" href="#">
+<span class="material-symbols-outlined text-sm">folder</span>
+<span class="text-sm">个人助理</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-2 text-zinc-500 font-['Manrope'] hover:text-zinc-200" href="#">
+<span class="material-symbols-outlined text-sm">terminal</span>
+<span class="text-sm">测试环境变量</span>
+</a>
+</nav>
+<!-- Footer Tabs -->
+<div class="mt-auto border-t border-zinc-800/50 pt-4">
+<a class="flex items-center gap-3 px-4 py-3 text-zinc-400 font-['Manrope'] hover:bg-zinc-800/50 transition-colors duration-200 hover:text-zinc-100" href="#">
+<span class="material-symbols-outlined">settings</span>
+<span>Settings</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-zinc-400 font-['Manrope'] hover:bg-zinc-800/50 transition-colors duration-200 hover:text-zinc-100" href="#">
+<span class="material-symbols-outlined">help_outline</span>
+<span>Support</span>
+</a>
+<div class="px-4 py-3 mt-2 flex items-center gap-3">
+<img alt="User Profile Avatar" class="w-8 h-8 rounded-full border border-zinc-700" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCY8vJtvYqWYt5rf5HW78U_czHRxGL_Tbmi84ERwn4XvkoTrJyeh_D2TWgf2tpPweVD4PR80twXJ1hozFCp27N23eALu4dkebCc6zpjbGjNIbEk6UOzCTUUAMdx8Jeaknmlon8lym2oW9ahC9qMdrSny4vRppu3GuZf_l7p29cQOJhX2NoIHXpliSByfmOlPFM7tdPnYf8q9QhdHwqlB3WikwXM7boe16kRZCHkDKwXL2OpjMnjinjfEt5VPje5sUe7vgxVU_apsQg"/>
+<div class="flex flex-col">
+<span class="text-xs font-bold text-zinc-200">Alex Chen</span>
+<span class="text-[10px] text-[#00e38a]">Pro Tier</span>
+</div>
+</div>
+</div>
+</aside>
+<!-- Main Workspace Content Area -->
+<main class="ml-64 h-screen flex flex-col relative bg-[#121212]">
+<!-- TopAppBar -->
+<header class="h-16 flex justify-between items-center px-8 w-full backdrop-blur-md bg-[#0e0e0e]/90 border-b border-white/5 sticky top-0 z-40">
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-3">
+<span class="text-zinc-500 font-headline text-sm tracking-tight">当前会话</span>
+<span class="text-zinc-700 text-sm">/</span>
+<span class="text-zinc-500 font-headline text-sm tracking-tight">工作空间</span>
+<span class="text-zinc-700 text-sm">/</span>
+<span class="text-[#00e38a] font-headline text-sm font-bold tracking-tight neon-glow">个人助理</span>
+</div>
+<!-- Dynamic Feedback Indicator -->
+<div class="flex items-center gap-2 bg-primary/10 px-3 py-1 rounded-full border border-primary/20">
+<div class="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot"></div>
+<span class="text-[10px] text-primary font-bold uppercase tracking-wider">Agent Active</span>
+</div>
+</div>
+<div class="flex items-center gap-6">
+<div class="flex items-center gap-4">
+<button class="text-zinc-400 hover:text-primary transition-colors">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<button class="text-zinc-400 hover:text-primary transition-colors">
+<span class="material-symbols-outlined">more_vert</span>
+</button>
+</div>
+<div class="h-8 w-[1px] bg-zinc-800"></div>
+<img alt="User Avatar" class="w-8 h-8 rounded-full border border-white/10" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBGkmTPqo2UlAo6LLjtDroZumNTZXJ0tvRJS5RHohTFMfGF_iOvoYXsereq_JKCr45RkrJogyBGHIA-ghIXm7mu-rg9HTcCRRr5J56nOVBa8cc8F0qu2km8m_GeAOwczrE1mZlfqgMfPRj0Wh-C4fhFnOpnaadR_XLOlsjJqn6V0b3Fdqp44dCP589MmbKFY2uVTZ6B8V8oAiWB-wuuaYpYVxw3nM07972IT50vGMdsStOBfghJIURA9T0wpd6iBw2dAtJumjLuuco"/>
+</div>
+</header>
+<!-- Chat Stream Section -->
+<section class="flex-1 overflow-y-auto px-8 py-12 space-y-12 max-w-5xl mx-auto w-full">
+<!-- User Message -->
+<div class="flex flex-col items-end gap-3 group">
+<div class="flex items-center gap-2 mb-1">
+<span class="text-[10px] font-bold text-zinc-500 tracking-widest uppercase">你</span>
+</div>
+<div class="bg-[#1f1f1f] border border-white/5 rounded-2xl rounded-tr-none px-6 py-4 max-w-[80%] shadow-lg">
+<p class="text-zinc-200 font-body leading-relaxed">
+                    基于我最近在工作空间上传的项目文档，你能帮我分析一下下周“智能物流网”项目的三个核心风险点，并给出建议的自动化流程吗？
+                </p>
+</div>
+</div>
+<!-- AI Response Message -->
+<div class="flex flex-col items-start gap-4">
+<div class="flex items-center gap-3">
+<div class="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center border border-primary/20">
+<span class="material-symbols-outlined text-primary text-xl" style="font-variation-settings: 'FILL' 1;">bolt</span>
+</div>
+<div class="flex items-center gap-2">
+<span class="text-[10px] font-bold text-[#00e38a] tracking-widest uppercase neon-glow">WorkBuddy Assistant</span>
+<span class="w-1 h-1 bg-zinc-600 rounded-full"></span>
+<span class="text-[9px] text-zinc-500 font-medium">刚刚</span>
+</div>
+</div>
+<div class="bg-[#191a1a] border border-white/5 rounded-3xl rounded-tl-none p-8 w-full shadow-2xl relative overflow-hidden group">
+<!-- Subtle Glow Ornament -->
+<div class="absolute -top-24 -right-24 w-48 h-48 bg-primary/5 rounded-full blur-[80px]"></div>
+<div class="relative z-10 space-y-6">
+<p class="text-on-surface text-lg font-medium leading-relaxed font-headline">分析完毕。针对“智能物流网”项目，我识别出以下三个核心风险点：</p>
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+<div class="p-5 bg-black/20 rounded-2xl border border-white/5 hover:border-primary/20 transition-all">
+<div class="text-primary mb-3">
+<span class="material-symbols-outlined">sync_problem</span>
+</div>
+<h4 class="font-headline font-bold text-zinc-200 mb-2">多端同步延迟</h4>
+<p class="text-zinc-500 text-sm leading-snug">边缘节点与云端在高并发环境下可能存在150ms以上的响应差。</p>
+</div>
+<div class="p-5 bg-black/20 rounded-2xl border border-white/5 hover:border-primary/20 transition-all">
+<div class="text-primary mb-3">
+<span class="material-symbols-outlined">security</span>
+</div>
+<h4 class="font-headline font-bold text-zinc-200 mb-2">数据加密瓶颈</h4>
+<p class="text-zinc-500 text-sm leading-snug">AES-256全量加密在低功耗传感器上可能导致CPU占满。</p>
+</div>
+<div class="p-5 bg-black/20 rounded-2xl border border-white/5 hover:border-primary/20 transition-all">
+<div class="text-primary mb-3">
+<span class="material-symbols-outlined">hub</span>
+</div>
+<h4 class="font-headline font-bold text-zinc-200 mb-2">第三方API耦合</h4>
+<p class="text-zinc-500 text-sm leading-snug">目前强依赖于物流接口A，若其服务中断将导致核心链路瘫痪。</p>
+</div>
+</div>
+<div class="pt-4 border-t border-zinc-800">
+<h4 class="text-[#00e38a] font-bold text-sm mb-4 flex items-center gap-2">
+<span class="material-symbols-outlined text-sm">auto_awesome</span>
+                            建议自动化流程
+                        </h4>
+<div class="bg-black/40 p-4 rounded-xl border border-white/5 font-mono text-xs text-zinc-400">
+<span class="text-primary">trigger:</span> schedule(daily, 02:00)<br/>
+<span class="text-primary">step_1:</span> health_check("logistics_api_a")<br/>
+<span class="text-primary">step_2:</span> if (fail) -&gt; switch_fallback("api_b")<br/>
+<span class="text-primary">step_3:</span> notify_team("Risk mitigation executed")
+                        </div>
+</div>
+</div>
+</div>
+<!-- Action Chips -->
+<div class="flex gap-2 ml-11">
+<button class="px-3 py-1.5 rounded-full bg-zinc-800/50 border border-white/5 text-xs text-zinc-400 hover:bg-zinc-800 transition-all hover:text-white">重新生成</button>
+<button class="px-3 py-1.5 rounded-full bg-zinc-800/50 border border-white/5 text-xs text-zinc-400 hover:bg-zinc-800 transition-all hover:text-white">采纳建议</button>
+<button class="px-3 py-1.5 rounded-full bg-zinc-800/50 border border-white/5 text-xs text-zinc-400 hover:bg-zinc-800 transition-all hover:text-white">
+<span class="material-symbols-outlined text-xs">thumb_up</span>
+</button>
+</div>
+</div>
+<!-- Spacer for bottom input area padding -->
+<div class="h-80"></div>
+</section>
+<!-- Fixed Bottom Input Area -->
+<footer class="absolute bottom-0 left-0 right-0 pointer-events-none px-8 pb-6 pt-16 bg-gradient-to-t from-[#121212] via-[#121212]/80 to-transparent">
+<div class="max-w-4xl mx-auto w-full space-y-4 pointer-events-auto">
+<!-- Interactive Action Tags -->
+<div class="flex gap-2 overflow-x-auto pb-2 no-scrollbar mask-gradient">
+<button class="shrink-0 flex items-center gap-2 px-4 py-2 rounded-xl bg-[#191a1a] border border-white/5 hover:border-primary/40 hover:bg-zinc-800/50 text-zinc-400 hover:text-primary text-sm transition-all group active:scale-95">
+<span class="material-symbols-outlined text-lg">description</span>
+<span>文档处理</span>
+</button>
+<button class="shrink-0 flex items-center gap-2 px-4 py-2 rounded-xl bg-[#191a1a] border border-white/5 hover:border-primary/40 hover:bg-zinc-800/50 text-zinc-400 hover:text-primary text-sm transition-all group active:scale-95">
+<span class="material-symbols-outlined text-lg">movie</span>
+<span>视频生成</span>
+</button>
+<button class="shrink-0 flex items-center gap-2 px-4 py-2 rounded-xl bg-[#191a1a] border border-white/5 hover:border-primary/40 hover:bg-zinc-800/50 text-zinc-400 hover:text-primary text-sm transition-all group active:scale-95">
+<span class="material-symbols-outlined text-lg">search_insights</span>
+<span>深度研究</span>
+</button>
+<button class="shrink-0 flex items-center gap-2 px-4 py-2 rounded-xl bg-[#191a1a] border border-white/5 hover:border-primary/40 hover:bg-zinc-800/50 text-zinc-400 hover:text-primary text-sm transition-all group active:scale-95">
+<span class="material-symbols-outlined text-lg">slideshow</span>
+<span>幻灯片</span>
+</button>
+<button class="shrink-0 flex items-center gap-2 px-4 py-2 rounded-xl bg-[#191a1a] border border-white/5 hover:border-primary/40 hover:bg-zinc-800/50 text-zinc-400 hover:text-primary text-sm transition-all group active:scale-95">
+<span class="material-symbols-outlined text-lg">bar_chart</span>
+<span>数据分析</span>
+</button>
+<button class="shrink-0 flex items-center gap-2 px-4 py-2 rounded-xl bg-[#191a1a] border border-white/5 hover:border-primary/40 hover:bg-zinc-800/50 text-zinc-400 hover:text-primary text-sm transition-all group active:scale-95">
+<span class="material-symbols-outlined text-lg">insights</span>
+<span>数据可视化</span>
+</button>
+</div>
+<!-- Enhanced Input Capsule -->
+<div class="bg-[#191a1a] border border-white/10 rounded-2xl shadow-2xl overflow-hidden focus-within:border-primary/40 focus-within:ring-1 focus-within:ring-primary/20 transition-all">
+<!-- Top Tools Layer -->
+<div class="flex items-center justify-between px-4 pt-3 pb-1">
+<div class="flex items-center gap-3">
+<button class="text-zinc-500 hover:text-primary transition-colors flex items-center gap-1" title="Mention">
+<span class="material-symbols-outlined text-xl">alternate_email</span>
+</button>
+<button class="text-zinc-500 hover:text-primary transition-colors flex items-center gap-1" title="Upload file">
+<span class="material-symbols-outlined text-xl">attach_file</span>
+</button>
+</div>
+<!-- File Drag-and-Drop Cue -->
+<div class="flex items-center gap-2 px-3 py-1 border border-dashed border-zinc-700 rounded-lg text-[10px] text-zinc-500 group cursor-pointer hover:border-primary/40 hover:text-zinc-400 transition-all">
+<span class="material-symbols-outlined text-sm">upload_file</span>
+<span>拖拽文件或图片至此处</span>
+</div>
+</div>
+<!-- Text Input Area -->
+<div class="px-4 pb-2 flex gap-3">
+<div class="mt-2 text-[#00e38a] font-mono opacity-60">/</div>
+<textarea class="w-full bg-transparent border-none focus:ring-0 text-on-surface placeholder:text-zinc-600 font-body text-base h-24 resize-none py-2" placeholder="输入消息... (使用 / 触发命令)"></textarea>
+</div>
+<!-- Bottom Actions Layer -->
+<div class="flex items-center justify-between px-4 py-3 bg-white/[0.02] border-t border-white/5">
+<div class="flex items-center gap-2">
+<button class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800/50 hover:bg-zinc-700 transition-colors text-xs text-zinc-200 font-medium border border-white/5">
+<span class="material-symbols-outlined text-sm">build</span>
+                            Skills
+                        </button>
+</div>
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2 text-zinc-500 hover:text-on-surface cursor-pointer text-xs transition-colors">
+<span class="material-symbols-outlined text-lg">smart_toy</span>
+<span class="font-label">WorkBuddy-4o-Ultra</span>
+<span class="material-symbols-outlined text-xs">expand_more</span>
+</div>
+<!-- Primary Send Button Alignment -->
+<button class="w-10 h-10 rounded-xl bg-primary text-on-primary flex items-center justify-center shadow-[0_0_20px_rgba(0,227,138,0.3)] hover:shadow-[0_0_30px_rgba(0,227,138,0.5)] transition-all active:scale-90">
+<span class="material-symbols-outlined text-xl" style="font-variation-settings: 'FILL' 1;">near_me</span>
+</button>
+</div>
+</div>
+</div>
+<p class="text-[10px] text-center text-zinc-600 font-label tracking-tight opacity-60">WorkBuddy AI 可能偶尔会产生不准确的信息。建议核实重要细节。</p>
+</div>
+</footer>
+</main>
+</body></html>
