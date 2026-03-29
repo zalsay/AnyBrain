@@ -7,7 +7,7 @@ import appLogo from '../src-tauri/icons/128x128.png';
 const AI_CHAT_TAB_ID = '__ai_chat_flow__';
 const AI_CHAT_TAB = {
   id: AI_CHAT_TAB_ID,
-  name: 'AI 对话流',
+  name: 'AI 对话',
   url: ''
 };
 
@@ -53,11 +53,18 @@ interface ShortcutCommandSettings {
   defaultExecMode: ExecMode;
 }
 
+interface AiModelConfig {
+  id: string;
+  modelId: string;
+  contextLength: string;
+}
+
 interface AiProviderSettings {
   enabled: boolean;
   baseUrl: string;
   apiKey: string;
   modelId: string;
+  models: AiModelConfig[];
 }
 
 interface ChatMessage {
@@ -65,6 +72,14 @@ interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   status?: 'streaming' | 'error';
+}
+
+interface ChatSession {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  createdAt: number;
+  updatedAt: number;
 }
 
 const EXEC_MODE_OPTIONS: Array<{ value: ExecMode; label: string }> = [
@@ -93,12 +108,43 @@ const POPULAR_PLATFORMS = [
 const STORAGE_KEY = 'ai-chaty-platforms';
 const SETTINGS_DEFAULTS = { useSystemProxy: true, speechRate: 0.9 };
 const COMMAND_SETTINGS_DEFAULTS: ShortcutCommandSettings = { defaultExecMode: 'shell_with_output' };
-const AI_PROVIDER_DEFAULTS: AiProviderSettings = {
+const AI_MODEL_CONTEXT_DEFAULT = '200k';
+
+function createAiModelConfig(modelId = '', contextLength = AI_MODEL_CONTEXT_DEFAULT): AiModelConfig {
+  return {
+    id: `ai-model-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    modelId,
+    contextLength,
+  };
+}
+
+function normalizeAiProviderSettings(
+  value?: Partial<AiProviderSettings> & { models?: Array<Partial<AiModelConfig>> }
+): AiProviderSettings {
+  const models = Array.isArray(value?.models)
+    ? value.models.map((model, index) => ({
+      id: model?.id?.trim() || `ai-model-${index}-${Math.random().toString(36).slice(2, 8)}`,
+      modelId: model?.modelId?.trim() || '',
+      contextLength: model?.contextLength?.trim() || AI_MODEL_CONTEXT_DEFAULT,
+    }))
+    : [];
+
+  return {
+    enabled: Boolean(value?.enabled),
+    baseUrl: value?.baseUrl?.trim() || '',
+    apiKey: value?.apiKey?.trim() || '',
+    modelId: value?.modelId?.trim() || models.find(model => model.modelId)?.modelId || '',
+    models: models.length > 0 ? models : [createAiModelConfig()],
+  };
+}
+
+const AI_PROVIDER_DEFAULTS: AiProviderSettings = normalizeAiProviderSettings({
   enabled: false,
   baseUrl: '',
   apiKey: '',
-  modelId: ''
-};
+  modelId: '',
+  models: [],
+});
 const CHAT_WELCOME_MESSAGE: ChatMessage = {
   id: 'welcome',
   role: 'assistant',
@@ -276,6 +322,23 @@ function extractAssistantReply(payload: unknown) {
   return '';
 }
 
+function createChatSession(title = '新会话'): ChatSession {
+  const now = Date.now();
+  return {
+    id: `chat-session-${now}-${Math.random().toString(36).slice(2, 8)}`,
+    title,
+    messages: [CHAT_WELCOME_MESSAGE],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function deriveChatSessionTitle(content: string) {
+  const normalized = content.replace(/\s+/g, ' ').trim();
+  if (!normalized) return '新会话';
+  return normalized.slice(0, 18);
+}
+
 function PlatformIcon({ platformId, platformName, url, size = 16 }: { platformId: string; platformName: string; url?: string; size?: number }) {
   const [error, setError] = useState(false);
   const iconUrl = getIconUrl(platformId, platformName);
@@ -335,12 +398,16 @@ function App() {
   const [expandedCommandOutputs, setExpandedCommandOutputs] = useState<Record<string, boolean>>({});
   const [commandStatuses, setCommandStatuses] = useState<Record<string, 'running' | 'success' | 'error'>>({});
   const [aiProvider, setAiProvider] = useState<AiProviderSettings>(AI_PROVIDER_DEFAULTS);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([CHAT_WELCOME_MESSAGE]);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [activeChatSessionId, setActiveChatSessionId] = useState('');
   const [chatInput, setChatInput] = useState('');
   const [chatSending, setChatSending] = useState(false);
   const [chatError, setChatError] = useState('');
   const [chatCopyState, setChatCopyState] = useState<Record<string, 'success' | 'error'>>({});
   const [chatSpeakingId, setChatSpeakingId] = useState<string | null>(null);
+  const [showAiModelAddForm, setShowAiModelAddForm] = useState(false);
+  const [aiModelDraft, setAiModelDraft] = useState('');
+  const [aiContextDraft, setAiContextDraft] = useState(AI_MODEL_CONTEXT_DEFAULT);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const [hoveredTab, setHoveredTab] = useState<string | null>(null);
@@ -357,6 +424,27 @@ function App() {
   }, [platforms, tempTabs, aiProvider.enabled]);
 
   const isActiveAiChat = activeTab === AI_CHAT_TAB_ID;
+  const activeChatSession = useMemo(
+    () => chatSessions.find(session => session.id === activeChatSessionId) ?? null,
+    [chatSessions, activeChatSessionId]
+  );
+  const activeChatMessages = activeChatSession?.messages ?? [CHAT_WELCOME_MESSAGE];
+
+  const updateChatSession = (sessionId: string, updater: (session: ChatSession) => ChatSession) => {
+    setChatSessions(prev => prev.map(session => (
+      session.id === sessionId
+        ? updater(session)
+        : session
+    )));
+  };
+
+  const handleCreateChatSession = () => {
+    const nextSession = createChatSession();
+    setChatSessions(prev => [nextSession, ...prev]);
+    setActiveChatSessionId(nextSession.id);
+    setChatError('');
+    setChatInput('');
+  };
 
   useEffect(() => {
     loadPlatformsAsync().then(loaded => {
@@ -377,7 +465,7 @@ function App() {
         setSpeechRate(settings.speechRate);
         const loadedCommands = Array.isArray(parsed?.shortcutCommands) ? parsed.shortcutCommands : [];
         const loadedCommandSettings = { ...COMMAND_SETTINGS_DEFAULTS, ...(parsed?.shortcutCommandSettings || {}) };
-        const loadedAiProvider = { ...AI_PROVIDER_DEFAULTS, ...(parsed?.aiProvider || {}) };
+        const loadedAiProvider = normalizeAiProviderSettings(parsed?.aiProvider || {});
         setShortcutCommands(loadedCommands);
         setCommandSettings(loadedCommandSettings);
         setAiProvider(loadedAiProvider);
@@ -448,10 +536,23 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (chatSessions.length === 0) {
+      const nextSession = createChatSession();
+      setChatSessions([nextSession]);
+      setActiveChatSessionId(nextSession.id);
+      return;
+    }
+
+    if (!activeChatSessionId || !chatSessions.some(session => session.id === activeChatSessionId)) {
+      setActiveChatSessionId(chatSessions[0].id);
+    }
+  }, [chatSessions, activeChatSessionId]);
+
+  useEffect(() => {
     if (isActiveAiChat && !showSettings) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [chatMessages, isActiveAiChat, showSettings]);
+  }, [activeChatMessages, isActiveAiChat, showSettings]);
 
   useEffect(() => {
     return () => {
@@ -483,9 +584,54 @@ function App() {
 
   const updateAiProvider = (partial: Partial<AiProviderSettings>) => {
     setAiProvider(prev => {
-      const next = { ...prev, ...partial };
+      const next = normalizeAiProviderSettings({ ...prev, ...partial });
       persistSettings({ aiProvider: next });
       return next;
+    });
+  };
+
+  const resetAiModelDraft = () => {
+    setAiModelDraft('');
+    setAiContextDraft(AI_MODEL_CONTEXT_DEFAULT);
+  };
+
+  const handleAddAiModel = () => {
+    if (!aiModelDraft.trim()) return;
+    const nextModel = createAiModelConfig(aiModelDraft.trim(), aiContextDraft.trim() || AI_MODEL_CONTEXT_DEFAULT);
+    updateAiProvider({
+      models: [...(Array.isArray(aiProvider.models) ? aiProvider.models : []), nextModel],
+      modelId: aiProvider.modelId.trim() || nextModel.modelId,
+    });
+    setShowAiModelAddForm(false);
+    resetAiModelDraft();
+  };
+
+  const handleUpdateAiModel = (modelId: string, partial: Partial<AiModelConfig>) => {
+    const currentModels = Array.isArray(aiProvider.models) ? aiProvider.models : [];
+    const nextModels = currentModels.map(model => (
+      model.id === modelId
+        ? {
+          ...model,
+          ...partial,
+          contextLength: (partial.contextLength ?? model.contextLength).trim() || AI_MODEL_CONTEXT_DEFAULT,
+        }
+        : model
+    ));
+    const activeExists = nextModels.some(model => model.modelId.trim() && model.modelId === aiProvider.modelId);
+    updateAiProvider({
+      models: nextModels,
+      modelId: activeExists ? aiProvider.modelId : (nextModels.find(model => model.modelId.trim())?.modelId ?? ''),
+    });
+  };
+
+  const handleRemoveAiModel = (modelId: string) => {
+    const currentModels = Array.isArray(aiProvider.models) ? aiProvider.models : [];
+    const nextModels = currentModels.filter(model => model.id !== modelId);
+    updateAiProvider({
+      models: nextModels.length > 0 ? nextModels : [createAiModelConfig('', AI_MODEL_CONTEXT_DEFAULT)],
+      modelId: nextModels.some(model => model.modelId === aiProvider.modelId)
+        ? aiProvider.modelId
+        : (nextModels.find(model => model.modelId.trim())?.modelId ?? ''),
     });
   };
 
@@ -698,8 +844,17 @@ function App() {
   const handleReloadPlatform = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (id === AI_CHAT_TAB_ID) {
-      setChatMessages([CHAT_WELCOME_MESSAGE]);
-      setChatError('');
+      if (!activeChatSessionId) {
+        handleCreateChatSession();
+      } else {
+        updateChatSession(activeChatSessionId, session => ({
+          ...session,
+          title: '新会话',
+          messages: [CHAT_WELCOME_MESSAGE],
+          updatedAt: Date.now(),
+        }));
+        setChatError('');
+      }
       return;
     }
     const platform = tempTabs.find(p => p.id === id) || platforms.find(p => p.id === id);
@@ -828,6 +983,15 @@ function App() {
     const content = chatInput.trim();
     if (!content) return;
 
+    let targetSessionId = activeChatSessionId;
+    if (!targetSessionId) {
+      const nextSession = createChatSession();
+      setChatSessions([nextSession]);
+      setActiveChatSessionId(nextSession.id);
+      targetSessionId = nextSession.id;
+    }
+
+    const currentSession = chatSessions.find(session => session.id === targetSessionId);
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
@@ -841,8 +1005,14 @@ function App() {
       status: 'streaming'
     };
 
-    const nextMessages = [...chatMessages, userMessage];
-    setChatMessages([...nextMessages, assistantPlaceholder]);
+    const baseMessages = currentSession?.messages ?? [CHAT_WELCOME_MESSAGE];
+    const nextMessages = [...baseMessages, userMessage];
+    updateChatSession(targetSessionId, session => ({
+      ...session,
+      title: session.messages.length <= 1 ? deriveChatSessionTitle(content) : session.title,
+      messages: [...nextMessages, assistantPlaceholder],
+      updatedAt: Date.now(),
+    }));
     setChatInput('');
     setChatSending(true);
     setChatError('');
@@ -921,11 +1091,15 @@ function App() {
                 const delta = extractStreamingDelta(eventPayload);
                 if (delta) {
                   currentReply += delta;
-                  setChatMessages(prev => prev.map(message => (
-                    message.id === assistantId
-                      ? { ...message, content: currentReply, status: 'streaming' }
-                      : message
-                  )));
+                  updateChatSession(targetSessionId, session => ({
+                    ...session,
+                    messages: session.messages.map(message => (
+                      message.id === assistantId
+                        ? { ...message, content: currentReply, status: 'streaming' }
+                        : message
+                    )),
+                    updatedAt: Date.now(),
+                  }));
                 }
                 payload = eventPayload;
               } catch (parseError) {
@@ -961,19 +1135,27 @@ function App() {
         throw new Error(lastError || '请求失败，请检查模型接口配置。');
       }
 
-      setChatMessages(prev => prev.map(message => (
-        message.id === assistantId
-          ? { ...message, content: reply, status: undefined }
-          : message
-      )));
+      updateChatSession(targetSessionId, session => ({
+        ...session,
+        messages: session.messages.map(message => (
+          message.id === assistantId
+            ? { ...message, content: reply, status: undefined }
+            : message
+        )),
+        updatedAt: Date.now(),
+      }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setChatError(message);
-      setChatMessages(prev => prev.map(item => (
-        item.id === assistantId
-          ? { ...item, content: `请求失败：${message}`, status: 'error' }
-          : item
-      )));
+      updateChatSession(targetSessionId, session => ({
+        ...session,
+        messages: session.messages.map(item => (
+          item.id === assistantId
+            ? { ...item, content: `请求失败：${message}`, status: 'error' }
+            : item
+        )),
+        updatedAt: Date.now(),
+      }));
     } finally {
       setChatSending(false);
     }
@@ -1223,11 +1405,35 @@ function App() {
       </div>
 
       {isActiveAiChat && !showSettings && (
-        <main className="ai-workbuddy-shell ai-workbuddy-shell-single">
+        <main className="ai-workbuddy-shell">
+          <aside className="ai-workbuddy-sidebar">
+            <button className="ai-workbuddy-new-session" onClick={handleCreateChatSession} type="button">
+              <Plus size={15} />
+              <span>新开会话</span>
+            </button>
+
+            <div className="ai-workbuddy-session-list">
+              {chatSessions.map(session => (
+                <button
+                  key={session.id}
+                  className={`ai-workbuddy-session-item ${session.id === activeChatSessionId ? 'is-active' : ''}`}
+                  onClick={() => {
+                    setActiveChatSessionId(session.id);
+                    setChatError('');
+                  }}
+                  type="button"
+                >
+                  <span className="ai-workbuddy-session-title">{session.title}</span>
+                  <span className="ai-workbuddy-session-meta">{Math.max(session.messages.length - 1, 0)} 条消息</span>
+                </button>
+              ))}
+            </div>
+          </aside>
+
           <section className="ai-workbuddy-main">
             <div className="ai-workbuddy-scroll">
               <div className="ai-workbuddy-stream">
-                {chatMessages.map(message => (
+                {activeChatMessages.map(message => (
                   <article key={message.id} className={`ai-workbuddy-message ${message.role} ${message.status === 'error' ? 'is-error' : ''}`}>
                     <div className="ai-workbuddy-message-meta">
                       <div className="ai-workbuddy-avatar">
@@ -1283,16 +1489,24 @@ function App() {
                       <KeyRound size={16} />
                     </button>
                   </div>
-                  <button
-                    className="ai-workbuddy-reset"
-                    onClick={() => {
-                      setChatMessages([CHAT_WELCOME_MESSAGE]);
-                      setChatError('');
-                    }}
-                  >
-                    <RefreshCw size={14} />
-                    <span>清空对话</span>
-                  </button>
+                  <div className="ai-workbuddy-composer-session">
+                    <button
+                      className="ai-workbuddy-reset"
+                      onClick={() => {
+                        if (!activeChatSessionId) return;
+                        updateChatSession(activeChatSessionId, session => ({
+                          ...session,
+                          title: '新会话',
+                          messages: [CHAT_WELCOME_MESSAGE],
+                          updatedAt: Date.now(),
+                        }));
+                        setChatError('');
+                      }}
+                    >
+                      <RefreshCw size={14} />
+                      <span>清空当前会话</span>
+                    </button>
+                  </div>
                 </div>
 
                 {chatError && <div className="ai-workbuddy-error">{chatError}</div>}
@@ -1529,23 +1743,129 @@ function App() {
                   />
                 </div>
               </label>
+            </div>
 
-              <label className="panel-ai-field">
-                <span>Model ID</span>
-                <div className="panel-ai-input-wrap">
-                  <Bot size={14} />
+            <div className="panel-ai-model-selector">
+              <div className="panel-section-header panel-section-header-tight">
+                <div>
+                  <div className="panel-ai-title">当前使用模型</div>
+                  <div className="panel-ai-desc">聊天页会使用这里选中的模型发送请求。</div>
+                </div>
+              </div>
+              <div className="select-container panel-ai-select-wrap">
+                <select
+                  className="panel-select panel-ai-select"
+                  value={aiProvider.modelId}
+                  onChange={e => updateAiProvider({ modelId: e.target.value })}
+                >
+                  <option value="">请选择模型</option>
+                  {(Array.isArray(aiProvider.models) ? aiProvider.models : []).map(model => (
+                    <option key={model.id} value={model.modelId} disabled={!model.modelId.trim()}>
+                      {model.modelId.trim() || '未填写 Model ID'} · {model.contextLength.trim() || AI_MODEL_CONTEXT_DEFAULT}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="select-icon" size={14} />
+              </div>
+            </div>
+
+            <div className="panel-ai-models">
+              <div className="panel-section-header panel-section-header-tight">
+                <div>
+                  <div className="panel-ai-title">模型列表</div>
+                  <div className="panel-ai-desc">可添加多个 Model ID，并为每个模型单独定义上下文长度。</div>
+                </div>
+                {!showAiModelAddForm && (
+                  <button className="panel-item-action-btn panel-ai-add-inline" onClick={() => setShowAiModelAddForm(true)}>
+                    <Plus size={14} />
+                    <span>添加模型</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="panel-ai-model-list">
+                {(Array.isArray(aiProvider.models) ? aiProvider.models : []).map((model, index) => {
+                  const isActiveModel = model.modelId.trim() && model.modelId === aiProvider.modelId;
+                  return (
+                    <div key={model.id} className={`panel-ai-model-item ${isActiveModel ? 'is-active' : ''}`}>
+                      <div className="panel-ai-model-head">
+                        <div className="panel-ai-model-meta">
+                          <span className="panel-ai-model-index">模型 {index + 1}</span>
+                          {isActiveModel && <span className="panel-ai-model-badge">当前</span>}
+                        </div>
+                        <button
+                          className="panel-item-delete"
+                          onClick={() => handleRemoveAiModel(model.id)}
+                          title="删除模型"
+                          aria-label="删除模型"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+
+                      <div className="panel-ai-model-grid">
+                        <label className="panel-ai-field">
+                          <span>Model ID</span>
+                          <div className="panel-ai-input-wrap">
+                            <Bot size={14} />
+                            <input
+                              className="add-input panel-ai-input"
+                              placeholder="如 gpt-4.1-mini / deepseek-chat"
+                              value={model.modelId}
+                              onChange={e => handleUpdateAiModel(model.id, { modelId: e.target.value })}
+                            />
+                          </div>
+                        </label>
+
+                        <label className="panel-ai-field">
+                          <span>上下文长度</span>
+                          <input
+                            className="add-input panel-ai-input panel-ai-context-input"
+                            placeholder="默认 200k"
+                            value={model.contextLength}
+                            onChange={e => handleUpdateAiModel(model.id, { contextLength: e.target.value })}
+                            onBlur={e => {
+                              if (!e.target.value.trim()) handleUpdateAiModel(model.id, { contextLength: AI_MODEL_CONTEXT_DEFAULT });
+                            }}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {showAiModelAddForm && (
+                <div className="add-form panel-ai-add-form">
                   <input
                     className="add-input panel-ai-input"
-                    placeholder="如 gpt-4.1-mini / deepseek-chat"
-                    value={aiProvider.modelId}
-                    onChange={e => updateAiProvider({ modelId: e.target.value })}
+                    placeholder="新增 Model ID"
+                    value={aiModelDraft}
+                    onChange={e => setAiModelDraft(e.target.value)}
+                    autoFocus
                   />
+                  <input
+                    className="add-input panel-ai-input"
+                    placeholder="上下文长度，默认 200k"
+                    value={aiContextDraft}
+                    onChange={e => setAiContextDraft(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleAddAiModel()}
+                  />
+                  <div className="add-form-actions">
+                    <button className="add-form-cancel" onClick={() => {
+                      setShowAiModelAddForm(false);
+                      resetAiModelDraft();
+                    }}>取消</button>
+                    <button className="add-form-confirm" onClick={handleAddAiModel} disabled={!aiModelDraft.trim()}>
+                      添加模型
+                    </button>
+                  </div>
                 </div>
-              </label>
+              )}
             </div>
 
             <div className="panel-ai-tips">
-              保存方式为自动持久化；推荐填写兼容 OpenAI Chat Completions 的接口地址。
+              保存方式为自动持久化；推荐填写兼容 OpenAI Chat Completions 的接口地址。每个模型的上下文长度默认值为 200k。
             </div>
           </div>
 
