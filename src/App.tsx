@@ -1000,13 +1000,6 @@ function App() {
     invoke('navigate_webview_forward', { platformId: activeBrowserPlatform.id }).catch(console.error);
   };
 
-  const handleMenuSaveToFavorites = (platform: Platform) => {
-    const p = { ...platform, id: platform.id.replace('tmp-', 'fixed-') };
-    setPlatforms(prev => [...prev, p]);
-    setTempTabs(prev => prev.filter(t => t.id !== platform.id));
-    setActiveTab(p.id);
-  };
-
   const handleCopyMessage = async (messageId: string, content: string) => {
     try {
       await navigator.clipboard.writeText(content);

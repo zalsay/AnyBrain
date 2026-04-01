@@ -6,14 +6,6 @@ use std::sync::{Mutex, OnceLock};
 use tauri::webview::{DownloadEvent, PageLoadEvent, NewWindowResponse};
 use url::Url;
 
-fn debug_log(msg: &str) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/brainer_debug.log") {
-        let _ = writeln!(f, "{}", msg);
-    }
-    eprintln!("{}", msg);
-}
-
 /// The height of the tab row in logical (CSS) pixels.
 pub const TITLE_BAR_LOGICAL_HEIGHT: f64 = 40.0;
 /// The height of the browser toolbar row in logical (CSS) pixels.
@@ -335,29 +327,22 @@ pub fn create_or_show_webview(
     platform_id: String,
     url: String,
 ) -> Result<(), String> {
-    debug_log(&format!("[create_or_show_webview] id={} url={}", platform_id, url));
     let window = app.get_window("main").ok_or("Main window not found")?;
 
     // Hide other child webviews first
     for webview in app.webviews().values() {
         if webview.label() != "main" && webview.label() != platform_id {
-            eprintln!("[webview] hiding '{}'", webview.label());
             let _ = webview.hide();
         }
     }
 
     let (position, size) = compute_child_bounds(&window);
-    eprintln!(
-        "[webview] create_or_show '{}' bounds: pos=({},{}) size={}x{}",
-        platform_id, position.x, position.y, size.width, size.height
-    );
 
     if let Some(existing_webview) = app.get_webview(&platform_id) {
         // Webview already exists — update bounds and show
         let _ = existing_webview.set_position(position);
         let _ = existing_webview.set_size(size);
         let _ = existing_webview.show();
-        eprintln!("[webview] re-shown '{}'", platform_id);
         emit_navigation_state(&app, &platform_id);
     } else {
         // Create a new child webview with isolated data directory
@@ -403,7 +388,6 @@ pub fn create_or_show_webview(
             // id[6] = (id[6] & 0x0f) | 0x40;
             // id[8] = (id[8] & 0x3f) | 0x80;
             // builder = builder.data_store_identifier(id);
-            debug_log(&format!("[webview] data_store_identifier DISABLED for '{}'", store_key));
         }
 
         let platform_id_clone = platform_id.clone();
@@ -411,11 +395,9 @@ pub fn create_or_show_webview(
         builder = builder.on_page_load(move |_webview, payload| {
             match payload.event() {
                 PageLoadEvent::Started => {
-                    eprintln!("[webview] page load STARTED '{}' url={}", platform_id_clone, payload.url());
                     sync_navigation_url(&app_handle_for_page_load, &platform_id_clone, payload.url().as_str(), true);
                 }
                 PageLoadEvent::Finished => {
-                    debug_log(&format!("[webview] page load FINISHED '{}' url={}", platform_id_clone, payload.url()));
                     sync_navigation_url(&app_handle_for_page_load, &platform_id_clone, payload.url().as_str(), false);
                     let _ = _webview.eval(TTS_REINIT_SCRIPT);
                 }
@@ -426,8 +408,6 @@ pub fn create_or_show_webview(
         let app_handle_for_auth = app.clone();
         let platform_id_for_auth = platform_id.clone();
         builder = builder.on_new_window(move |url, _features| {
-            debug_log(&format!("[on_new_window] url={} size={:?}", url.as_str(), _features.size()));
-
             let url_str = url.as_str();
             let is_auth = url_str.contains("auth") || url_str.contains("login")
                 || url_str.contains("signin") || url_str.contains("signup")
@@ -442,7 +422,6 @@ pub fn create_or_show_webview(
                 // NewWindowResponse::Allow which creates a detached native
                 // popup that macOS WKWebView cannot properly manage in
                 // release/sandboxed builds.
-                debug_log(" -> Navigating current webview to auth URL");
                 if let Some(wv) = app_handle_for_auth.get_webview(&platform_id_for_auth) {
                     let _ = navigate_webview_to_url(&wv, url_str);
                 }
@@ -459,8 +438,6 @@ pub fn create_or_show_webview(
         builder = builder.on_download(move |_webview, event| {
             match event {
                 DownloadEvent::Requested { url, destination } => {
-                    eprintln!("[download] requested: {}, default destination: {:?}", url, destination);
-
                     // Use the filename from the pre-populated destination (derived from
                     // Content-Disposition header by wry), falling back to URL parsing.
                     let filename = destination.file_name()
@@ -478,14 +455,10 @@ pub fn create_or_show_webview(
                         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Downloads"));
 
                     let path = unique_download_path(&downloads_dir, &filename);
-                    eprintln!("[download] saving to: {:?}", path);
                     *destination = path;
                     true
                 }
-                DownloadEvent::Finished { url, path, success } => {
-                    eprintln!("[download] finished: {} -> {:?}, success: {}", url, path, success);
-                    true
-                }
+                DownloadEvent::Finished { .. } => true,
                 _ => true,
             }
         });
@@ -502,7 +475,6 @@ pub fn create_or_show_webview(
                 // wv.inner() returns *mut c_void which is a raw WKWebView pointer
                 let wk_webview: *mut std::ffi::c_void = wv.inner();
                 if wk_webview.is_null() {
-                    debug_log("[webview] wk_webview is null, cannot enable javaScriptCanOpenWindowsAutomatically");
                     return;
                 }
 
@@ -558,12 +530,8 @@ pub fn create_or_show_webview(
                 // [prefs setValue:@YES forKey:@"javaScriptCanOpenWindowsAutomatically"]
                 let f: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void) = std::mem::transmute(objc_msgSend as *const ());
                 f(prefs, sel_set_value, yes_value, key_str);
-
-                debug_log("[webview] enabled javaScriptCanOpenWindowsAutomatically via raw objc");
             }
-        }).unwrap_or_else(|e| debug_log(&format!("[webview] with_webview error: {}", e)));
-
-        debug_log(&format!("[webview] created new '{}'", platform_id));
+        }).map_err(|e| e.to_string())?;
     }
 
     Ok(())

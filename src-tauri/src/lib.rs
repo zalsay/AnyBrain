@@ -20,9 +20,7 @@ fn state_file_path(app: &tauri::AppHandle) -> PathBuf {
 fn load_window_state(app: &tauri::AppHandle) -> Option<WindowState> {
     let path = state_file_path(app);
     let data = fs::read_to_string(&path).ok()?;
-    let state: WindowState = serde_json::from_str(&data).ok()?;
-    eprintln!("[state] loaded: {:?}", state);
-    Some(state)
+    serde_json::from_str(&data).ok()
 }
 
 fn save_window_state(app: &tauri::AppHandle, state: &WindowState) {
@@ -32,7 +30,6 @@ fn save_window_state(app: &tauri::AppHandle, state: &WindowState) {
     }
     if let Ok(json) = serde_json::to_string_pretty(state) {
         let _ = fs::write(&path, json);
-        eprintln!("[state] saved: {:?}", state);
     }
 }
 
@@ -230,15 +227,12 @@ pub fn run() {
                 use tauri::PhysicalSize;
                 let _ = main_window.set_size(PhysicalSize::new(state.width, state.height));
                 let _ = main_window.set_position(PhysicalPosition::new(state.x, state.y));
-                eprintln!("[setup] Restored window: {}x{} at ({},{})", state.width, state.height, state.x, state.y);
             }
 
             let window_clone = main_window.clone();
 
             // Throttle state: last resize timestamp
             let last_resize = Mutex::new(Instant::now());
-
-            eprintln!("[setup] Window resize listener registered");
 
             main_window.on_window_event(move |event| {
                 match event {
@@ -264,13 +258,6 @@ pub fn run() {
                         let child_width = physical_size.width;
                         let child_height = physical_size.height.saturating_sub(child_top_inset);
                         let child_y = child_top_inset as i32;
-
-                        eprintln!(
-                            "[resize] window={}x{} scale={} top_chrome_phys={} child: y={} w={} h={}",
-                            physical_size.width, physical_size.height,
-                            scale_factor, top_chrome_physical_height,
-                            child_y, child_width, child_height
-                        );
 
                         let webviews = window_clone.app_handle().webviews();
                         for webview in webviews.values() {
