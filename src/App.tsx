@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { Bot, ChevronDown, ChevronUp, Copy, Globe, Home, KeyRound, Plus, RefreshCw, SendHorizonal, Sparkles, Star, Trash2, Volume2, VolumeX, X } from 'lucide-react';
 import './App.css';
@@ -409,6 +410,9 @@ function App() {
   const [aiModelDraft, setAiModelDraft] = useState('');
   const [aiContextDraft, setAiContextDraft] = useState(AI_MODEL_CONTEXT_DEFAULT);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const quickAddButtonRef = useRef<HTMLButtonElement | null>(null);
+  const hoveredTabRef = useRef<HTMLDivElement | null>(null);
+  const hoverMenuHideTimeoutRef = useRef<number | null>(null);
 
   const [hoveredTab, setHoveredTab] = useState<string | null>(null);
   const [selectedPreset, setSelectedPreset] = useState<string>('');
@@ -416,6 +420,8 @@ function App() {
   const [newUrl, setNewUrl] = useState('');
   const [quickName, setQuickName] = useState('');
   const [quickUrl, setQuickUrl] = useState('');
+  const [quickAddPosition, setQuickAddPosition] = useState({ top: 0, left: 0 });
+  const [tabHoverMenuPosition, setTabHoverMenuPosition] = useState({ top: 0, left: 0, width: 0, height: 0 });
 
   const allVisibleTabs = useMemo(() => {
     const visiblePlatforms = platforms.filter(p => !p.hidden);
@@ -477,6 +483,39 @@ function App() {
       setSettingsLoaded(true);
     });
   }, []);
+
+  useEffect(() => {
+    if (!showQuickAdd) return;
+
+    updateQuickAddPosition();
+    const handleWindowChange = () => updateQuickAddPosition();
+    window.addEventListener('resize', handleWindowChange);
+    window.addEventListener('scroll', handleWindowChange, true);
+
+    return () => {
+      window.removeEventListener('resize', handleWindowChange);
+      window.removeEventListener('scroll', handleWindowChange, true);
+    };
+  }, [showQuickAdd]);
+
+  useEffect(() => {
+    const shouldShowHoverMenu = hoveredTab !== null && hoveredTab === activeTab;
+    if (!shouldShowHoverMenu || !hoveredTabRef.current) return;
+
+    const handleWindowChange = () => {
+      if (!hoveredTabRef.current) return;
+      updateTabHoverMenuPosition(hoveredTabRef.current);
+    };
+
+    handleWindowChange();
+    window.addEventListener('resize', handleWindowChange);
+    window.addEventListener('scroll', handleWindowChange, true);
+
+    return () => {
+      window.removeEventListener('resize', handleWindowChange);
+      window.removeEventListener('scroll', handleWindowChange, true);
+    };
+  }, [hoveredTab, activeTab]);
 
   useEffect(() => {
     if (allVisibleTabs.length > 0 && (!activeTab || !allVisibleTabs.some(tab => tab.id === activeTab))) {
@@ -556,6 +595,7 @@ function App() {
 
   useEffect(() => {
     return () => {
+      clearHoverMenuHideTimeout();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
@@ -668,6 +708,58 @@ function App() {
     setQuickName('');
     setQuickUrl('');
   };
+
+  const updateQuickAddPosition = () => {
+    const buttonRect = quickAddButtonRef.current?.getBoundingClientRect();
+    if (!buttonRect) return;
+
+    const popoverWidth = 260;
+    const popoverHeight = 188;
+    const gap = 8;
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+
+    const left = Math.min(
+      Math.max(gap, buttonRect.right - popoverWidth),
+      Math.max(gap, viewportWidth - popoverWidth - gap)
+    );
+
+    const preferredTop = buttonRect.bottom + gap;
+    const top = preferredTop + popoverHeight <= viewportHeight - gap
+      ? preferredTop
+      : Math.max(gap, buttonRect.top - popoverHeight - gap);
+
+    setQuickAddPosition({ top, left });
+  };
+
+  const updateTabHoverMenuPosition = (tabElement: HTMLDivElement) => {
+    const tabRect = tabElement.getBoundingClientRect();
+
+    const viewportWidth = window.innerWidth;
+    const width = Math.round(tabRect.width);
+    const height = Math.round(tabRect.height);
+    const left = tabRect.right + width <= viewportWidth
+      ? Math.round(tabRect.right - 1)
+      : Math.max(0, Math.round(tabRect.left - width + 1));
+    const top = Math.max(0, Math.round(tabRect.top));
+
+    setTabHoverMenuPosition({ top, left, width, height });
+  };
+
+  const clearHoverMenuHideTimeout = () => {
+    if (hoverMenuHideTimeoutRef.current === null) return;
+    window.clearTimeout(hoverMenuHideTimeoutRef.current);
+    hoverMenuHideTimeoutRef.current = null;
+  };
+
+  const scheduleHoverMenuHide = () => {
+    clearHoverMenuHideTimeout();
+    hoverMenuHideTimeoutRef.current = window.setTimeout(() => {
+      setHoveredTab(null);
+      hoverMenuHideTimeoutRef.current = null;
+    }, 500);
+  };
+
 
   const resetCommandDraft = () => {
     setCommandDraftName('');
@@ -1200,39 +1292,24 @@ function App() {
             </div>
           )}
 
-          {platforms.filter(p => !p.hidden).map((platform) => (
+          {platforms.filter(p => !p.hidden).map((platform) => {
+            const showTabActions = activeTab === platform.id && hoveredTab === platform.id;
+            return (
             <div
               key={platform.id}
+              ref={showTabActions ? hoveredTabRef : null}
               className={`tab-button ${activeTab === platform.id ? 'active' : ''}`}
               onClick={() => setActiveTab(platform.id)}
-              onMouseEnter={() => setHoveredTab(platform.id)}
-              onMouseLeave={() => setHoveredTab(null)}
+              onMouseEnter={(e) => {
+                clearHoverMenuHideTimeout();
+                setHoveredTab(platform.id);
+                updateTabHoverMenuPosition(e.currentTarget);
+              }}
+              onMouseLeave={scheduleHoverMenuHide}
             >
-              {activeTab === platform.id && (
-                <button
-                  className="tab-refresh-btn tab-refresh-left"
-                  onClick={(e) => handleReloadPlatform(e, platform.id)}
-                  title="刷新"
-                  aria-label="刷新当前标签"
-                >
-                  <RefreshCw size={14} />
-                </button>
-              )}
               <div className="tab-info">
                 <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={16} />
-                <span className="tab-name-text" style={{ opacity: hoveredTab === platform.id ? 0 : 1 }}>{platform.name}</span>
-                {hoveredTab === platform.id && (
-                  <div className="tab-hover-menu">
-                    <button
-                      className="tab-hover-btn"
-                      title="返回主页"
-                      onClick={(e) => { e.stopPropagation(); handleMenuHome(platform.id, platform.url); }}
-                      aria-label="返回主页"
-                    >
-                      <Home size={14} />
-                    </button>
-                  </div>
-                )}
+                <span className="tab-name-text">{platform.name}</span>
               </div>
               <button
                 className="tab-close-btn"
@@ -1243,53 +1320,31 @@ function App() {
                 <X size={12} />
               </button>
             </div>
-          ))}
+            );
+          })}
 
           {platforms.filter(p => !p.hidden).length > 0 && tempTabs.length > 0 && (
             <div className="tab-divider" aria-hidden="true" />
           )}
 
-          {tempTabs.map((platform) => (
+          {tempTabs.map((platform) => {
+            const showTabActions = activeTab === platform.id && hoveredTab === platform.id;
+            return (
             <div
               key={platform.id}
+              ref={showTabActions ? hoveredTabRef : null}
               className={`tab-button ${activeTab === platform.id ? 'active' : ''}`}
               onClick={() => setActiveTab(platform.id)}
-              onMouseEnter={() => setHoveredTab(platform.id)}
-              onMouseLeave={() => setHoveredTab(null)}
+              onMouseEnter={(e) => {
+                clearHoverMenuHideTimeout();
+                setHoveredTab(platform.id);
+                updateTabHoverMenuPosition(e.currentTarget);
+              }}
+              onMouseLeave={scheduleHoverMenuHide}
             >
-              {activeTab === platform.id && (
-                <button
-                  className="tab-refresh-btn tab-refresh-left"
-                  onClick={(e) => handleReloadPlatform(e, platform.id)}
-                  title="刷新"
-                  aria-label="刷新当前标签"
-                >
-                  <RefreshCw size={14} />
-                </button>
-              )}
               <div className="tab-info">
                 <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={16} />
-                <span className="tab-name-text" style={{ opacity: hoveredTab === platform.id ? 0 : 1 }}>{platform.name}</span>
-                {hoveredTab === platform.id && (
-                  <div className="tab-hover-menu">
-                    <button
-                      className="tab-hover-btn"
-                      title="返回主页"
-                      onClick={(e) => { e.stopPropagation(); handleMenuHome(platform.id, platform.url); }}
-                      aria-label="返回主页"
-                    >
-                      <Home size={14} />
-                    </button>
-                    <button
-                      className="tab-hover-btn"
-                      title="保存到我的收藏"
-                      onClick={(e) => { e.stopPropagation(); handleMenuSaveToFavorites(platform); }}
-                      aria-label="保存到我的收藏"
-                    >
-                      <Star size={14} />
-                    </button>
-                  </div>
-                )}
+                <span className="tab-name-text">{platform.name}</span>
               </div>
               <button
                 className="tab-close-btn"
@@ -1300,10 +1355,12 @@ function App() {
                 <X size={12} />
               </button>
             </div>
-          ))}
+            );
+          })}
 
           <div className="tab-add-wrapper">
             <button
+              ref={quickAddButtonRef}
               className="tab-add-button"
               onClick={() => {
                 if (showSettings) return;
@@ -1320,8 +1377,12 @@ function App() {
             >
               <Plus size={16} />
             </button>
-            {showQuickAdd && (
-              <div className="tab-add-popover">
+            {showQuickAdd && createPortal(
+              <div
+                className="tab-add-popover"
+                style={{ top: `${quickAddPosition.top}px`, left: `${quickAddPosition.left}px` }}
+                onClick={e => e.stopPropagation()}
+              >
                 <div className="tab-add-title">新增标签</div>
                 <input
                   className="tab-add-input"
@@ -1396,7 +1457,64 @@ function App() {
                     打开
                   </button>
                 </div>
-              </div>
+              </div>,
+              document.body
+            )}
+            {hoveredTab !== null && hoveredTab === activeTab && createPortal(
+              <div
+                className="tab-hover-menu tab-hover-menu-side"
+                style={{
+                  top: `${tabHoverMenuPosition.top}px`,
+                  left: `${tabHoverMenuPosition.left}px`,
+                  width: `${tabHoverMenuPosition.width}px`,
+                  height: `${tabHoverMenuPosition.height}px`
+                }}
+                onMouseEnter={() => {
+                  clearHoverMenuHideTimeout();
+                  setHoveredTab(activeTab);
+                  if (hoveredTabRef.current) {
+                    updateTabHoverMenuPosition(hoveredTabRef.current);
+                  }
+                }}
+                onMouseLeave={scheduleHoverMenuHide}
+                onClick={e => e.stopPropagation()}
+              >
+                <button
+                  className="tab-hover-btn"
+                  title="刷新"
+                  onClick={(e) => handleReloadPlatform(e, activeTab)}
+                  aria-label="刷新当前标签"
+                >
+                  <RefreshCw size={14} />
+                </button>
+                <button
+                  className="tab-hover-btn"
+                  title="返回主页"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const currentPlatform = tempTabs.find(p => p.id === activeTab) || platforms.find(p => p.id === activeTab);
+                    if (!currentPlatform) return;
+                    handleMenuHome(currentPlatform.id, currentPlatform.url);
+                  }}
+                  aria-label="返回主页"
+                >
+                  <Home size={14} />
+                </button>
+                <button
+                  className="tab-hover-btn"
+                  title="保存到我的收藏"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const currentPlatform = tempTabs.find(p => p.id === activeTab) || platforms.find(p => p.id === activeTab);
+                    if (!currentPlatform) return;
+                    handleMenuSaveToFavorites(currentPlatform);
+                  }}
+                  aria-label="保存到我的收藏"
+                >
+                  <Star size={14} />
+                </button>
+              </div>,
+              document.body
             )}
           </div>
         </div>

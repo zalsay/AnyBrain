@@ -148,7 +148,6 @@ textarea {
 }
 
 .tab-add-wrapper {
-  position: relative;
   display: flex;
   align-items: flex-end;
   height: 100%;
@@ -205,9 +204,7 @@ textarea {
 }
 
 .tab-add-popover {
-  position: absolute;
-  top: 44px;
-  right: 0;
+  position: fixed;
   width: 260px;
   padding: 12px;
   background: var(--panel-glass);
@@ -376,6 +373,7 @@ textarea {
   color: var(--text-muted);
   cursor: pointer;
   position: relative;
+  overflow: visible;
   backdrop-filter: blur(22px) saturate(145%);
   -webkit-backdrop-filter: blur(22px) saturate(145%);
   transition: all 0.18s ease;
@@ -454,15 +452,31 @@ textarea {
 }
 
 .tab-hover-menu {
-  position: absolute;
-  inset: 0;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding-left: 24px;
-  background: linear-gradient(90deg, transparent, rgba(18, 19, 19, 0.24) 16%, rgba(18, 28, 24, 0.74));
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+}
+
+.tab-hover-menu-side {
+  position: fixed;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  padding: 0 10px;
+  border-radius: 14px 14px 0 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.03)),
+    linear-gradient(145deg, rgba(22, 46, 37, 0.72), rgba(20, 22, 21, 0.78));
+  border: 1px solid rgba(0, 227, 138, 0.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 0 0 1px rgba(0, 227, 138, 0.05),
+    0 12px 26px rgba(0, 0, 0, 0.14),
+    0 0 18px rgba(0, 227, 138, 0.06);
+  backdrop-filter: blur(22px) saturate(145%);
+  -webkit-backdrop-filter: blur(22px) saturate(145%);
+  justify-content: center;
+  z-index: 980;
 }
 
 .tab-divider {
