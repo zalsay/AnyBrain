@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
-import { Bot, ChevronDown, ChevronUp, Copy, Globe, Home, KeyRound, Plus, RefreshCw, SendHorizonal, Sparkles, Star, Trash2, Volume2, VolumeX, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Bot, ChevronDown, ChevronUp, Copy, Globe, Home, KeyRound, Plus, RefreshCw, SendHorizonal, Sparkles, Trash2, Volume2, VolumeX, X } from 'lucide-react';
 import './App.css';
 import appLogo from '../src-tauri/icons/128x128.png';
 
@@ -81,6 +81,15 @@ interface ChatSession {
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;
+}
+
+interface BrowserNavigationState {
+  platformId: string;
+  currentUrl: string;
+  homeUrl: string;
+  isLoading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
 }
 
 const EXEC_MODE_OPTIONS: Array<{ value: ExecMode; label: string }> = [
@@ -409,19 +418,15 @@ function App() {
   const [showAiModelAddForm, setShowAiModelAddForm] = useState(false);
   const [aiModelDraft, setAiModelDraft] = useState('');
   const [aiContextDraft, setAiContextDraft] = useState(AI_MODEL_CONTEXT_DEFAULT);
+  const [browserNavStates, setBrowserNavStates] = useState<Record<string, BrowserNavigationState>>({});
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const quickAddButtonRef = useRef<HTMLButtonElement | null>(null);
-  const hoveredTabRef = useRef<HTMLDivElement | null>(null);
-  const hoverMenuHideTimeoutRef = useRef<number | null>(null);
-
-  const [hoveredTab, setHoveredTab] = useState<string | null>(null);
   const [selectedPreset, setSelectedPreset] = useState<string>('');
   const [newName, setNewName] = useState('');
   const [newUrl, setNewUrl] = useState('');
   const [quickName, setQuickName] = useState('');
   const [quickUrl, setQuickUrl] = useState('');
   const [quickAddPosition, setQuickAddPosition] = useState({ top: 0, left: 0 });
-  const [tabHoverMenuPosition, setTabHoverMenuPosition] = useState({ top: 0, left: 0, width: 0, height: 0 });
 
   const allVisibleTabs = useMemo(() => {
     const visiblePlatforms = platforms.filter(p => !p.hidden);
@@ -430,6 +435,13 @@ function App() {
   }, [platforms, tempTabs, aiProvider.enabled]);
 
   const isActiveAiChat = activeTab === AI_CHAT_TAB_ID;
+  const activeBrowserPlatform = useMemo(
+    () => tempTabs.find(p => p.id === activeTab) || platforms.find(p => p.id === activeTab) || null,
+    [activeTab, platforms, tempTabs]
+  );
+  const activeBrowserUrl = activeBrowserPlatform?.url?.trim() || '';
+  const activeBrowserNavState = activeTab ? browserNavStates[activeTab] : undefined;
+  const activeBrowserDisplayUrl = activeBrowserNavState?.currentUrl || activeBrowserUrl || (isActiveAiChat ? 'AnyBrain AI 对话' : '输入网址或在标签页中打开页面');
   const activeChatSession = useMemo(
     () => chatSessions.find(session => session.id === activeChatSessionId) ?? null,
     [chatSessions, activeChatSessionId]
@@ -499,25 +511,6 @@ function App() {
   }, [showQuickAdd]);
 
   useEffect(() => {
-    const shouldShowHoverMenu = hoveredTab !== null && hoveredTab === activeTab;
-    if (!shouldShowHoverMenu || !hoveredTabRef.current) return;
-
-    const handleWindowChange = () => {
-      if (!hoveredTabRef.current) return;
-      updateTabHoverMenuPosition(hoveredTabRef.current);
-    };
-
-    handleWindowChange();
-    window.addEventListener('resize', handleWindowChange);
-    window.addEventListener('scroll', handleWindowChange, true);
-
-    return () => {
-      window.removeEventListener('resize', handleWindowChange);
-      window.removeEventListener('scroll', handleWindowChange, true);
-    };
-  }, [hoveredTab, activeTab]);
-
-  useEffect(() => {
     if (allVisibleTabs.length > 0 && (!activeTab || !allVisibleTabs.some(tab => tab.id === activeTab))) {
       setActiveTab(allVisibleTabs[0].id);
     }
@@ -544,7 +537,6 @@ function App() {
     invoke('create_or_show_webview', {
       platformId: platform.id,
       url: platform.url,
-      topOffset: 70.0
     })
       .then(() => invoke('set_tts_rate', { rate: speechRate }))
       .catch(console.error);
@@ -559,15 +551,36 @@ function App() {
     const unlistenPromise = (async () => {
       // @ts-ignore: dynamic import for event APIs
       const { listen } = await import('@tauri-apps/api/event');
-      const unlisten = await listen<string>('new_tab_request', (event) => {
-        const url = event.payload || '';
-        if (!url) return;
-        const id = `tmp-${Date.now()}`;
-        const name = deriveNameFromUrl(url);
-        setTempTabs(prev => [...prev, { id, name, url }]);
-        setActiveTab(id);
-      });
-      return unlisten;
+      const [unlistenNewTab, unlistenNavState, unlistenNavRemoved] = await Promise.all([
+        listen<string>('new_tab_request', (event) => {
+          const url = event.payload || '';
+          if (!url) return;
+          const id = `tmp-${Date.now()}`;
+          const name = deriveNameFromUrl(url);
+          setTempTabs(prev => [...prev, { id, name, url }]);
+          setActiveTab(id);
+        }),
+        listen<BrowserNavigationState>('browser_navigation_state', (event) => {
+          const payload = event.payload;
+          if (!payload?.platformId) return;
+          setBrowserNavStates(prev => ({ ...prev, [payload.platformId]: payload }));
+        }),
+        listen<string>('browser_navigation_state_removed', (event) => {
+          const platformId = event.payload;
+          if (!platformId) return;
+          setBrowserNavStates(prev => {
+            const next = { ...prev };
+            delete next[platformId];
+            return next;
+          });
+        })
+      ]);
+
+      return () => {
+        try { unlistenNewTab(); } catch { }
+        try { unlistenNavState(); } catch { }
+        try { unlistenNavRemoved(); } catch { }
+      };
     })();
     return () => {
       unlistenPromise.then(u => { try { u(); } catch { } });
@@ -595,7 +608,6 @@ function App() {
 
   useEffect(() => {
     return () => {
-      clearHoverMenuHideTimeout();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
@@ -692,7 +704,6 @@ function App() {
         invoke('create_or_show_webview', {
           platformId: platform.id,
           url: platform.url,
-          topOffset: 78.0
         }).catch(console.error);
       }
     }
@@ -732,33 +743,6 @@ function App() {
     setQuickAddPosition({ top, left });
   };
 
-  const updateTabHoverMenuPosition = (tabElement: HTMLDivElement) => {
-    const tabRect = tabElement.getBoundingClientRect();
-
-    const viewportWidth = window.innerWidth;
-    const width = Math.round(tabRect.width);
-    const height = Math.round(tabRect.height);
-    const left = tabRect.right + width <= viewportWidth
-      ? Math.round(tabRect.right - 1)
-      : Math.max(0, Math.round(tabRect.left - width + 1));
-    const top = Math.max(0, Math.round(tabRect.top));
-
-    setTabHoverMenuPosition({ top, left, width, height });
-  };
-
-  const clearHoverMenuHideTimeout = () => {
-    if (hoverMenuHideTimeoutRef.current === null) return;
-    window.clearTimeout(hoverMenuHideTimeoutRef.current);
-    hoverMenuHideTimeoutRef.current = null;
-  };
-
-  const scheduleHoverMenuHide = () => {
-    clearHoverMenuHideTimeout();
-    hoverMenuHideTimeoutRef.current = window.setTimeout(() => {
-      setHoveredTab(null);
-      hoverMenuHideTimeoutRef.current = null;
-    }, 500);
-  };
 
 
   const resetCommandDraft = () => {
@@ -1002,8 +986,18 @@ function App() {
     });
   };
 
-  const handleMenuHome = (id: string, url: string) => {
-    invoke('reload_webview_url', { platformId: id, url }).catch(console.error);
+  const handleMenuHome = (id: string) => {
+    invoke('navigate_webview_home', { platformId: id }).catch(console.error);
+  };
+
+  const handleNavigateBack = () => {
+    if (!activeBrowserPlatform) return;
+    invoke('navigate_webview_back', { platformId: activeBrowserPlatform.id }).catch(console.error);
+  };
+
+  const handleNavigateForward = () => {
+    if (!activeBrowserPlatform) return;
+    invoke('navigate_webview_forward', { platformId: activeBrowserPlatform.id }).catch(console.error);
   };
 
   const handleMenuSaveToFavorites = (platform: Platform) => {
@@ -1255,7 +1249,8 @@ function App() {
 
   return (
     <div className="app-container">
-      <div className="titlebar">
+      <div className={`top-shell ${isActiveAiChat ? 'without-browser-toolbar' : ''}`}>
+        <div className="titlebar">
         <div className="tabs-container">
           <button className="icon-button settings-logo-btn" onClick={toggleSettings} aria-label="设置">
             <img src={appLogo} alt="Brainer Logo" className="app-logo-small" />
@@ -1293,19 +1288,11 @@ function App() {
           )}
 
           {platforms.filter(p => !p.hidden).map((platform) => {
-            const showTabActions = activeTab === platform.id && hoveredTab === platform.id;
             return (
             <div
               key={platform.id}
-              ref={showTabActions ? hoveredTabRef : null}
               className={`tab-button ${activeTab === platform.id ? 'active' : ''}`}
               onClick={() => setActiveTab(platform.id)}
-              onMouseEnter={(e) => {
-                clearHoverMenuHideTimeout();
-                setHoveredTab(platform.id);
-                updateTabHoverMenuPosition(e.currentTarget);
-              }}
-              onMouseLeave={scheduleHoverMenuHide}
             >
               <div className="tab-info">
                 <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={16} />
@@ -1328,19 +1315,11 @@ function App() {
           )}
 
           {tempTabs.map((platform) => {
-            const showTabActions = activeTab === platform.id && hoveredTab === platform.id;
             return (
             <div
               key={platform.id}
-              ref={showTabActions ? hoveredTabRef : null}
               className={`tab-button ${activeTab === platform.id ? 'active' : ''}`}
               onClick={() => setActiveTab(platform.id)}
-              onMouseEnter={(e) => {
-                clearHoverMenuHideTimeout();
-                setHoveredTab(platform.id);
-                updateTabHoverMenuPosition(e.currentTarget);
-              }}
-              onMouseLeave={scheduleHoverMenuHide}
             >
               <div className="tab-info">
                 <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={16} />
@@ -1460,66 +1439,74 @@ function App() {
               </div>,
               document.body
             )}
-            {hoveredTab !== null && hoveredTab === activeTab && createPortal(
-              <div
-                className="tab-hover-menu tab-hover-menu-side"
-                style={{
-                  top: `${tabHoverMenuPosition.top}px`,
-                  left: `${tabHoverMenuPosition.left}px`,
-                  width: `${tabHoverMenuPosition.width}px`,
-                  height: `${tabHoverMenuPosition.height}px`
-                }}
-                onMouseEnter={() => {
-                  clearHoverMenuHideTimeout();
-                  setHoveredTab(activeTab);
-                  if (hoveredTabRef.current) {
-                    updateTabHoverMenuPosition(hoveredTabRef.current);
-                  }
-                }}
-                onMouseLeave={scheduleHoverMenuHide}
-                onClick={e => e.stopPropagation()}
-              >
-                <button
-                  className="tab-hover-btn"
-                  title="刷新"
-                  onClick={(e) => handleReloadPlatform(e, activeTab)}
-                  aria-label="刷新当前标签"
-                >
-                  <RefreshCw size={14} />
-                </button>
-                <button
-                  className="tab-hover-btn"
-                  title="返回主页"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const currentPlatform = tempTabs.find(p => p.id === activeTab) || platforms.find(p => p.id === activeTab);
-                    if (!currentPlatform) return;
-                    handleMenuHome(currentPlatform.id, currentPlatform.url);
-                  }}
-                  aria-label="返回主页"
-                >
-                  <Home size={14} />
-                </button>
-                <button
-                  className="tab-hover-btn"
-                  title="保存到我的收藏"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const currentPlatform = tempTabs.find(p => p.id === activeTab) || platforms.find(p => p.id === activeTab);
-                    if (!currentPlatform) return;
-                    handleMenuSaveToFavorites(currentPlatform);
-                  }}
-                  aria-label="保存到我的收藏"
-                >
-                  <Star size={14} />
-                </button>
-              </div>,
-              document.body
-            )}
           </div>
         </div>
 
         <div className="titlebar-actions" />
+      </div>
+
+      {!isActiveAiChat && (
+        <div className={`browser-toolbar ${showSettings ? 'is-hidden' : ''}`}>
+          <div className="browser-toolbar-nav">
+            <button
+              className="browser-toolbar-btn"
+              type="button"
+              aria-label="后退"
+              title="后退"
+              onClick={handleNavigateBack}
+              disabled={!activeBrowserPlatform || isActiveAiChat || !activeBrowserNavState?.canGoBack}
+            >
+              <ArrowLeft size={16} />
+            </button>
+            <button
+              className="browser-toolbar-btn"
+              type="button"
+              aria-label="前进"
+              title="前进"
+              onClick={handleNavigateForward}
+              disabled={!activeBrowserPlatform || isActiveAiChat || !activeBrowserNavState?.canGoForward}
+            >
+              <ArrowRight size={16} />
+            </button>
+            <button
+              className="browser-toolbar-btn"
+              type="button"
+              aria-label={isActiveAiChat ? '清空当前会话' : '刷新当前标签'}
+              title={isActiveAiChat ? '清空当前会话' : '刷新当前标签'}
+              onClick={(e) => handleReloadPlatform(e, activeTab)}
+              disabled={!activeTab}
+            >
+              <RefreshCw size={16} />
+            </button>
+            <button
+              className="browser-toolbar-btn"
+              type="button"
+              aria-label="返回主页"
+              title="返回主页"
+              onClick={() => {
+                if (!activeBrowserPlatform) return;
+                handleMenuHome(activeBrowserPlatform.id);
+              }}
+              disabled={!activeBrowserPlatform || isActiveAiChat}
+            >
+              <Home size={16} />
+            </button>
+          </div>
+
+          <div className={`browser-toolbar-address ${isActiveAiChat ? 'is-ai-chat' : ''}`}>
+            <Globe size={16} className="browser-toolbar-address-icon" />
+            <input
+              className="browser-toolbar-address-input"
+              value={activeBrowserDisplayUrl}
+              readOnly
+              aria-label="当前地址"
+            />
+            {activeBrowserNavState?.isLoading && !isActiveAiChat && (
+              <span className="browser-toolbar-loading" aria-label="页面加载中">加载中</span>
+            )}
+          </div>
+        </div>
+      )}
       </div>
 
       {isActiveAiChat && !showSettings && (

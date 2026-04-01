@@ -209,6 +209,9 @@ pub fn run() {
             ai_window_manager::create_or_show_webview,
             ai_window_manager::destroy_webview,
             ai_window_manager::hide_all_webviews,
+            ai_window_manager::navigate_webview_home,
+            ai_window_manager::navigate_webview_back,
+            ai_window_manager::navigate_webview_forward,
             ai_window_manager::reload_webview,
             ai_window_manager::reload_webview_url,
             ai_window_manager::set_tts_rate
@@ -252,17 +255,20 @@ pub fn run() {
 
                         let scale_factor = window_clone.scale_factor().unwrap_or(2.0);
 
-                        let tab_logical_height = ai_window_manager::TAB_BAR_LOGICAL_HEIGHT;
-                        let tab_physical_height = (tab_logical_height * scale_factor) as u32;
+                        let top_chrome_physical_height =
+                            (ai_window_manager::TOP_CHROME_LOGICAL_HEIGHT * scale_factor).ceil() as u32;
+                        let child_extra_top_inset =
+                            (ai_window_manager::CHILD_WEBVIEW_EXTRA_TOP_INSET_LOGICAL_HEIGHT * scale_factor).ceil() as u32;
+                        let child_top_inset = top_chrome_physical_height.saturating_add(child_extra_top_inset);
 
-                        let child_y = tab_physical_height as i32;
                         let child_width = physical_size.width;
-                        let child_height = physical_size.height.saturating_sub(tab_physical_height);
+                        let child_height = physical_size.height.saturating_sub(child_top_inset);
+                        let child_y = child_top_inset as i32;
 
                         eprintln!(
-                            "[resize] window={}x{} scale={} tab_phys={} child: y={} w={} h={}",
+                            "[resize] window={}x{} scale={} top_chrome_phys={} child: y={} w={} h={}",
                             physical_size.width, physical_size.height,
-                            scale_factor, tab_physical_height,
+                            scale_factor, top_chrome_physical_height,
                             child_y, child_width, child_height
                         );
 

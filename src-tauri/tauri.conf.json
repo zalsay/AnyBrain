@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Brainer",
+  "productName": "AnyBrain",
   "version": "0.1.0",
   "identifier": "com.yingzhang.brainer",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Brainer",
+        "title": "AnyBrain",
         "width": 1024,
         "height": 1300
       }

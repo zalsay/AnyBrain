@@ -11,6 +11,7 @@
   --panel-glass: rgba(15, 23, 42, 0.72);
   --panel-soft: rgba(15, 23, 42, 0.48);
   --titlebar-height: 40px;
+  --browser-toolbar-height: 36px;
 }
 
 @media (prefers-color-scheme: light) {
@@ -60,6 +61,7 @@ textarea {
 }
 
 .app-container {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -70,7 +72,28 @@ textarea {
   border: 1px solid var(--border-color);
 }
 
+.top-shell {
+  position: relative;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 calc(var(--titlebar-height) + var(--browser-toolbar-height));
+  height: calc(var(--titlebar-height) + var(--browser-toolbar-height));
+  min-height: calc(var(--titlebar-height) + var(--browser-toolbar-height));
+  max-height: calc(var(--titlebar-height) + var(--browser-toolbar-height));
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.top-shell.without-browser-toolbar {
+  flex: 0 0 var(--titlebar-height);
+  height: var(--titlebar-height);
+  min-height: var(--titlebar-height);
+  max-height: var(--titlebar-height);
+}
+
 .titlebar {
+  flex: 0 0 var(--titlebar-height);
   height: var(--titlebar-height);
   min-height: var(--titlebar-height);
   background:
@@ -88,8 +111,32 @@ textarea {
   z-index: 20;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.02),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.browser-toolbar {
+  position: relative;
+  z-index: 21;
+  flex: 0 0 var(--browser-toolbar-height);
+  height: var(--browser-toolbar-height);
+  min-height: var(--browser-toolbar-height);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  box-sizing: border-box;
+  background:
+    linear-gradient(180deg, rgba(14, 18, 18, 0.9), rgba(12, 14, 14, 0.82)),
+    linear-gradient(145deg, rgba(18, 30, 26, 0.52), rgba(10, 12, 12, 0.78));
+  border-bottom: 1px solid rgba(120, 255, 194, 0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
     0 12px 28px rgba(0, 0, 0, 0.18);
+}
+
+.browser-toolbar.is-hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .tabs-container {
@@ -112,6 +159,83 @@ textarea {
 .titlebar-actions {
   width: 24px;
   flex: 0 0 auto;
+}
+
+.browser-toolbar-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.browser-toolbar-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(30, 34, 36, 0.82);
+  color: rgba(229, 238, 252, 0.82);
+  cursor: pointer;
+  transition: all 0.16s ease;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.browser-toolbar-btn:hover:not(:disabled) {
+  color: #f4fff9;
+  background: rgba(0, 227, 138, 0.14);
+  border-color: rgba(120, 255, 194, 0.3);
+}
+
+.browser-toolbar-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.browser-toolbar-address {
+  min-width: 0;
+  flex: 1;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(14, 18, 20, 0.84);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.browser-toolbar-address.is-ai-chat {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(12, 24, 20, 0.82);
+}
+
+.browser-toolbar-address-icon {
+  color: rgba(229, 238, 252, 0.72);
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+
+.browser-toolbar-address-input {
+  width: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: rgba(244, 255, 249, 0.94);
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.browser-toolbar-loading {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1;
+  color: rgba(120, 255, 194, 0.96);
+  white-space: nowrap;
 }
 
 .icon-button {
@@ -422,7 +546,6 @@ textarea {
 
 .tab-close-btn,
 .tab-refresh-btn,
-.tab-hover-btn,
 .panel-item-action-btn,
 .panel-item-delete {
   width: 24px;
@@ -440,7 +563,6 @@ textarea {
 
 .tab-close-btn:hover,
 .tab-refresh-btn:hover,
-.tab-hover-btn:hover,
 .panel-item-action-btn:hover,
 .panel-item-delete:hover {
   background: rgba(0, 227, 138, 0.08);
@@ -449,34 +571,6 @@ textarea {
 
 .tab-refresh-left {
   flex: 0 0 auto;
-}
-
-.tab-hover-menu {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.tab-hover-menu-side {
-  position: fixed;
-  display: flex;
-  align-items: center;
-  box-sizing: border-box;
-  padding: 0 10px;
-  border-radius: 14px 14px 0 0;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.03)),
-    linear-gradient(145deg, rgba(22, 46, 37, 0.72), rgba(20, 22, 21, 0.78));
-  border: 1px solid rgba(0, 227, 138, 0.18);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.1),
-    inset 0 0 0 1px rgba(0, 227, 138, 0.05),
-    0 12px 26px rgba(0, 0, 0, 0.14),
-    0 0 18px rgba(0, 227, 138, 0.06);
-  backdrop-filter: blur(22px) saturate(145%);
-  -webkit-backdrop-filter: blur(22px) saturate(145%);
-  justify-content: center;
-  z-index: 980;
 }
 
 .tab-divider {
