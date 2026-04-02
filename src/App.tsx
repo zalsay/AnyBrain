@@ -1,391 +1,105 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
-import { ArrowLeft, ArrowRight, Bot, ChevronDown, ChevronUp, Copy, Globe, Home, KeyRound, Plus, RefreshCw, SendHorizonal, Sparkles, Trash2, Volume2, VolumeX, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowUp, Bot, Brain, Copy, Globe, Home, Plus, RefreshCw, Sparkles, Square, Volume2, VolumeX, X } from 'lucide-react';
+import ComposerSelect from './components/chat/ComposerSelect';
+import SettingsPanel from './components/settings/SettingsPanel';
+import {
+  AI_CHAT_TAB,
+  AI_CHAT_TAB_ID,
+  AI_PROVIDER_DEFAULTS,
+  COMMAND_SETTINGS_DEFAULTS,
+  COMMAND_STATUS_LABELS,
+  EXEC_MODE_OPTIONS,
+  POPULAR_PLATFORMS,
+  SETTINGS_DEFAULTS,
+  THINKING_DEPTH_OPTIONS,
+} from './app/constants';
+import { AI_MODEL_CONTEXT_DEFAULT, createAiModelConfig, normalizeAiProviderSettings } from './features/ai-chat/provider';
+import PlatformIcon from './features/platforms/PlatformIcon';
+import { deriveNameFromUrl, loadPlatformsAsync, normalizeUrl, savePlatformsToFile } from './features/platforms/platformUtils';
+import { useAiChat } from './hooks/useAiChat';
+import type {
+  AiModelConfig,
+  AiProviderSettings,
+  BrowserNavigationState,
+  CommandExecMode,
+  ExecMode,
+  Platform,
+  PersistedChatHistory,
+  ShortcutCommand,
+  ShortcutCommandSettings,
+  ThinkingDepth,
+} from './types/app';
 import './App.css';
 import appLogo from '../src-tauri/icons/128x128.png';
 
-const AI_CHAT_TAB_ID = '__ai_chat_flow__';
-const AI_CHAT_TAB = {
-  id: AI_CHAT_TAB_ID,
-  name: 'AI 对话',
-  url: ''
-};
-
-// Preload all SVG/PNG icons from the assets folder using Vite
-const iconModules = import.meta.glob('/src/assets/icons/*.{svg,png}', { eager: true, query: '?url', import: 'default' }) as Record<string, string>;
-const getIconUrl = (id: string, name: string) => {
-  const normalizedId = id.toLowerCase();
-  const normalizedName = name.toLowerCase();
-
-  // Custom mapping for aliases (e.g. Chatgpt -> openai)
-  const searchTerms = [normalizedId, normalizedName];
-  if (normalizedId.includes('chatgpt') || normalizedName.includes('chatgpt')) searchTerms.push('openai');
-  if (normalizedId.includes('tongyi') || normalizedName.includes('tongyi')) searchTerms.push('qwen');
-  if (normalizedName.includes('minimax') || normalizedId.includes('minimax')) searchTerms.push('minimax');
-
-  for (const path in iconModules) {
-    const filename = path.split('/').pop()?.toLowerCase() || '';
-    if (searchTerms.some(term => filename.includes(term))) {
-      return iconModules[path];
-    }
-  }
-  return null;
-};
-
-interface Platform {
+interface ChatAttachment {
   id: string;
   name: string;
-  url: string;
-  hidden?: boolean;
+  size: number;
+  type: string;
+  content?: string;
+  isTextExtracted: boolean;
 }
 
-type ExecMode = 'shell_with_output' | 'shell_status_only' | 'external_terminal';
-type CommandExecMode = ExecMode | 'inherit';
+const TEXT_ATTACHMENT_EXTENSIONS = new Set([
+  'txt', 'md', 'markdown', 'json', 'csv', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs',
+  'py', 'rs', 'go', 'java', 'kt', 'swift', 'html', 'css', 'scss', 'less', 'sql',
+  'yaml', 'yml', 'xml', 'sh', 'bash', 'zsh', 'log'
+]);
 
-interface ShortcutCommand {
-  id: string;
-  name: string;
-  cmd: string;
-  execMode?: CommandExecMode;
+const MAX_ATTACHMENT_TEXT_BYTES = 200_000;
+const MAX_ATTACHMENT_TEXT_CHARS = 20_000;
+
+function formatAttachmentSize(size: number) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-interface ShortcutCommandSettings {
-  defaultExecMode: ExecMode;
+function canExtractAttachmentText(file: File) {
+  if (file.size > MAX_ATTACHMENT_TEXT_BYTES) return false;
+  if (file.type.startsWith('text/')) return true;
+  const extension = file.name.split('.').pop()?.toLowerCase() || '';
+  return TEXT_ATTACHMENT_EXTENSIONS.has(extension);
 }
 
-interface AiModelConfig {
-  id: string;
-  modelId: string;
-  contextLength: string;
-}
+async function buildChatAttachment(file: File): Promise<ChatAttachment> {
+  const isTextExtracted = canExtractAttachmentText(file);
+  let content = '';
 
-interface AiProviderSettings {
-  enabled: boolean;
-  baseUrl: string;
-  apiKey: string;
-  modelId: string;
-  models: AiModelConfig[];
-}
-
-interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  status?: 'streaming' | 'error';
-}
-
-interface ChatSession {
-  id: string;
-  title: string;
-  messages: ChatMessage[];
-  createdAt: number;
-  updatedAt: number;
-}
-
-interface BrowserNavigationState {
-  platformId: string;
-  currentUrl: string;
-  homeUrl: string;
-  isLoading: boolean;
-  canGoBack: boolean;
-  canGoForward: boolean;
-}
-
-const EXEC_MODE_OPTIONS: Array<{ value: ExecMode; label: string }> = [
-  { value: 'shell_with_output', label: '本地 shell（显示输出）' },
-  { value: 'shell_status_only', label: '本地 shell（仅状态）' },
-  { value: 'external_terminal', label: '外部终端执行' }
-];
-
-const COMMAND_STATUS_LABELS: Record<'running' | 'success' | 'error', string> = {
-  running: '运行中',
-  success: '成功',
-  error: '失败'
-};
-
-const POPULAR_PLATFORMS = [
-  { id: 'openai', name: 'ChatGPT', url: 'https://chatgpt.com' },
-  { id: 'claude', name: 'Claude', url: 'https://claude.ai' },
-  { id: 'gemini', name: 'Gemini', url: 'https://gemini.google.com/app' },
-  { id: 'qwen', name: '通义千问', url: 'https://tongyi.aliyun.com/qianwen/' },
-  { id: 'kimi', name: 'Kimi', url: 'https://kimi.moonshot.cn/' },
-  { id: 'deepseek', name: 'DeepSeek', url: 'https://chat.deepseek.com/' },
-  { id: 'zhipu', name: '智谱清言', url: 'https://chatglm.cn/' },
-  { id: 'minimax', name: 'MiniMax', url: 'https://api.minimax.chat/' },
-];
-
-const STORAGE_KEY = 'ai-chaty-platforms';
-const SETTINGS_DEFAULTS = { useSystemProxy: true, speechRate: 0.9 };
-const COMMAND_SETTINGS_DEFAULTS: ShortcutCommandSettings = { defaultExecMode: 'shell_with_output' };
-const AI_MODEL_CONTEXT_DEFAULT = '200k';
-
-function createAiModelConfig(modelId = '', contextLength = AI_MODEL_CONTEXT_DEFAULT): AiModelConfig {
-  return {
-    id: `ai-model-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    modelId,
-    contextLength,
-  };
-}
-
-function normalizeAiProviderSettings(
-  value?: Partial<AiProviderSettings> & { models?: Array<Partial<AiModelConfig>> }
-): AiProviderSettings {
-  const models = Array.isArray(value?.models)
-    ? value.models.map((model, index) => ({
-      id: model?.id?.trim() || `ai-model-${index}-${Math.random().toString(36).slice(2, 8)}`,
-      modelId: model?.modelId?.trim() || '',
-      contextLength: model?.contextLength?.trim() || AI_MODEL_CONTEXT_DEFAULT,
-    }))
-    : [];
-
-  return {
-    enabled: Boolean(value?.enabled),
-    baseUrl: value?.baseUrl?.trim() || '',
-    apiKey: value?.apiKey?.trim() || '',
-    modelId: value?.modelId?.trim() || models.find(model => model.modelId)?.modelId || '',
-    models: models.length > 0 ? models : [createAiModelConfig()],
-  };
-}
-
-const AI_PROVIDER_DEFAULTS: AiProviderSettings = normalizeAiProviderSettings({
-  enabled: false,
-  baseUrl: '',
-  apiKey: '',
-  modelId: '',
-  models: [],
-});
-const CHAT_WELCOME_MESSAGE: ChatMessage = {
-  id: 'welcome',
-  role: 'assistant',
-  content: '你好，我已经准备好了。开启 AI 对话流后，你可以在这里直接进行多轮对话。',
-};
-
-async function loadPlatformsAsync(): Promise<Platform[]> {
-  try {
-    const data: string = await invoke('load_platforms');
-    const parsed = JSON.parse(data);
-    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-  } catch { }
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        invoke('save_platforms', { data: saved }).catch(() => { });
-        return parsed;
-      }
+  if (isTextExtracted) {
+    try {
+      content = (await file.text()).slice(0, MAX_ATTACHMENT_TEXT_CHARS);
+    } catch {
+      content = '';
     }
-  } catch { }
-  return [];
-}
-
-function savePlatformsToFile(platforms: Platform[]) {
-  const data = JSON.stringify(platforms);
-  invoke('save_platforms', { data }).catch(console.error);
-  localStorage.setItem(STORAGE_KEY, data);
-}
-
-function normalizeUrl(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return '';
-  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed)) return trimmed;
-  return `https://${trimmed}`;
-}
-
-function deriveNameFromUrl(value: string) {
-  try {
-    const url = new URL(value);
-    return url.hostname.replace(/^www\./, '') || '新标签';
-  } catch {
-    return '新标签';
-  }
-}
-
-function joinBaseUrl(baseUrl: string) {
-  const trimmed = baseUrl.trim();
-  if (!trimmed) return '';
-  return trimmed.replace(/\/$/, '');
-}
-
-function buildChatApiUrl(baseUrl: string) {
-  const normalized = joinBaseUrl(normalizeUrl(baseUrl));
-  if (!normalized) return '';
-  if (/\/((v\d+\/)?chat\/completions|(v\d+\/)?responses)$/.test(normalized)) return normalized;
-  if (/\/v\d+$/.test(normalized)) return `${normalized}/chat/completions`;
-  return `${normalized}/v1/chat/completions`;
-}
-
-function buildResponsesApiUrl(baseUrl: string) {
-  const normalized = joinBaseUrl(normalizeUrl(baseUrl));
-  if (!normalized) return '';
-  if (/\/(v\d+\/)?responses$/.test(normalized)) return normalized;
-  if (/\/(v\d+\/)?chat\/completions$/.test(normalized)) return normalized.replace(/chat\/completions$/, 'responses');
-  if (/\/v\d+$/.test(normalized)) return `${normalized}/responses`;
-  return `${normalized}/v1/responses`;
-}
-
-function buildChatCompletionsPayload(messages: ChatMessage[], model: string) {
-  return {
-    model,
-    messages: messages.map(message => ({
-      role: message.role,
-      content: message.content,
-    })),
-    stream: true,
-    temperature: 0.7,
-  };
-}
-
-function buildResponsesPayload(messages: ChatMessage[], model: string) {
-  return {
-    model,
-    input: messages.map(message => ({
-      role: message.role,
-      content: [
-        {
-          type: 'input_text',
-          text: message.content,
-        }
-      ]
-    })),
-    stream: true,
-    temperature: 0.7,
-  };
-}
-
-function parseSseEventChunks(rawText: string) {
-  return rawText
-    .split(/\n\n+/)
-    .map(block => block
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line.startsWith('data:'))
-      .map(line => line.slice(5).trim())
-      .join('\n'))
-    .filter(Boolean);
-}
-
-function extractStreamingDelta(payload: unknown) {
-  const data = payload as {
-    choices?: Array<{ delta?: { content?: string | Array<{ type?: string; text?: string }> } }>;
-    delta?: string;
-    output_text?: string;
-  };
-
-  const choiceDelta = data?.choices?.[0]?.delta?.content;
-  if (typeof choiceDelta === 'string') return choiceDelta;
-  if (Array.isArray(choiceDelta)) {
-    return choiceDelta
-      .map(item => (item?.type === 'text' || !item?.type ? item?.text ?? '' : ''))
-      .join('');
   }
 
-  if (typeof data?.delta === 'string') return data.delta;
-  if (typeof data?.output_text === 'string') return data.output_text;
-  return '';
-}
-
-function extractErrorMessage(payload: unknown, fallback: string) {
-  if (!payload || typeof payload !== 'object') return fallback;
-  const maybePayload = payload as {
-    error?: { message?: string; code?: string | number } | string;
-    message?: string;
-    detail?: string;
-  };
-  if (typeof maybePayload.error === 'string') return maybePayload.error;
-  if (typeof maybePayload.error?.message === 'string') return maybePayload.error.message;
-  if (typeof maybePayload.message === 'string') return maybePayload.message;
-  if (typeof maybePayload.detail === 'string') return maybePayload.detail;
-  return fallback;
-}
-
-function extractAssistantReply(payload: unknown) {
-  const data = payload as {
-    choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> }; delta?: { content?: string } }>;
-    output_text?: string;
-    output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
-  };
-
-  const choiceContent = data?.choices?.[0]?.message?.content;
-  if (typeof choiceContent === 'string' && choiceContent.trim()) return choiceContent.trim();
-  if (Array.isArray(choiceContent)) {
-    const text = choiceContent
-      .map(item => (item?.type === 'text' || !item?.type ? item?.text ?? '' : ''))
-      .join('')
-      .trim();
-    if (text) return text;
-  }
-
-  const deltaContent = data?.choices?.[0]?.delta?.content;
-  if (typeof deltaContent === 'string' && deltaContent.trim()) return deltaContent.trim();
-
-  if (typeof data?.output_text === 'string' && data.output_text.trim()) return data.output_text.trim();
-
-  const outputText = data?.output
-    ?.flatMap(item => item.content ?? [])
-    .map(item => (item?.type === 'text' || !item?.type ? item?.text ?? '' : ''))
-    .join('')
-    .trim();
-  if (outputText) return outputText;
-
-  return '';
-}
-
-function createChatSession(title = '新会话'): ChatSession {
-  const now = Date.now();
   return {
-    id: `chat-session-${now}-${Math.random().toString(36).slice(2, 8)}`,
-    title,
-    messages: [CHAT_WELCOME_MESSAGE],
-    createdAt: now,
-    updatedAt: now,
+    id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
+    name: file.name,
+    size: file.size,
+    type: file.type,
+    content,
+    isTextExtracted: Boolean(content),
   };
 }
 
-function deriveChatSessionTitle(content: string) {
-  const normalized = content.replace(/\s+/g, ' ').trim();
-  if (!normalized) return '新会话';
-  return normalized.slice(0, 18);
-}
+function buildAttachmentContext(attachments: ChatAttachment[]) {
+  if (attachments.length === 0) return '';
 
-function PlatformIcon({ platformId, platformName, url, size = 16 }: { platformId: string; platformName: string; url?: string; size?: number }) {
-  const [error, setError] = useState(false);
-  const iconUrl = getIconUrl(platformId, platformName);
-
-  if (!iconUrl || error) {
-    if (url) {
-      try {
-        const domain = new URL(url).hostname;
-        const faviconUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=${size * 2}`;
-        return (
-          <img
-            src={faviconUrl}
-            alt="favicon"
-            width={size}
-            height={size}
-            className="platform-icon"
-            onError={() => setError(true)}
-          />
-        );
-      } catch {
+  return [
+    '附件信息：',
+    ...attachments.map((attachment, index) => {
+      const header = `${index + 1}. ${attachment.name} (${formatAttachmentSize(attachment.size)})`;
+      if (attachment.isTextExtracted && attachment.content) {
+        return `${header}\n内容摘录：\n${attachment.content}`;
       }
-    }
-    return <Globe size={size} />;
-  }
-
-  return (
-    <img
-      src={iconUrl}
-      alt="icon"
-      width={size}
-      height={size}
-      className="platform-icon"
-      onError={() => {
-        setError(true);
-      }}
-    />
-  );
+      return `${header}\n说明：该附件仅附带文件名和大小，当前未提取正文内容。`;
+    })
+  ].join('\n\n');
 }
 
 function App() {
@@ -408,25 +122,49 @@ function App() {
   const [expandedCommandOutputs, setExpandedCommandOutputs] = useState<Record<string, boolean>>({});
   const [commandStatuses, setCommandStatuses] = useState<Record<string, 'running' | 'success' | 'error'>>({});
   const [aiProvider, setAiProvider] = useState<AiProviderSettings>(AI_PROVIDER_DEFAULTS);
-  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
-  const [activeChatSessionId, setActiveChatSessionId] = useState('');
-  const [chatInput, setChatInput] = useState('');
-  const [chatSending, setChatSending] = useState(false);
-  const [chatError, setChatError] = useState('');
-  const [chatCopyState, setChatCopyState] = useState<Record<string, 'success' | 'error'>>({});
-  const [chatSpeakingId, setChatSpeakingId] = useState<string | null>(null);
+  const [persistedChatHistory, setPersistedChatHistory] = useState<PersistedChatHistory | null>(null);
+  const [chatHistoryLoaded, setChatHistoryLoaded] = useState(false);
   const [showAiModelAddForm, setShowAiModelAddForm] = useState(false);
   const [aiModelDraft, setAiModelDraft] = useState('');
   const [aiContextDraft, setAiContextDraft] = useState(AI_MODEL_CONTEXT_DEFAULT);
   const [browserNavStates, setBrowserNavStates] = useState<Record<string, BrowserNavigationState>>({});
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const quickAddButtonRef = useRef<HTMLButtonElement | null>(null);
+  const chatPersistTimeoutRef = useRef<number | null>(null);
   const [selectedPreset, setSelectedPreset] = useState<string>('');
   const [newName, setNewName] = useState('');
   const [newUrl, setNewUrl] = useState('');
   const [quickName, setQuickName] = useState('');
   const [quickUrl, setQuickUrl] = useState('');
   const [quickAddPosition, setQuickAddPosition] = useState({ top: 0, left: 0 });
+  const [thinkingDepth, setThinkingDepth] = useState<ThinkingDepth>('high');
+  const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
+  const {
+    chatSessions,
+    activeChatSessionId,
+    activeChatMessages,
+    chatInput,
+    chatSending,
+    chatError,
+    chatCopyState,
+    chatSpeakingId,
+    setActiveChatSessionId,
+    setChatInput,
+    setChatError,
+    createSession,
+    resetActiveSession,
+    copyMessage,
+    speakMessage,
+    sendChat,
+    retryMessage,
+  } = useAiChat({
+    aiProvider,
+    speechRate,
+    persistedHistory: persistedChatHistory,
+    historyLoaded: chatHistoryLoaded,
+    onHistoryChange: setPersistedChatHistory,
+  });
 
   const allVisibleTabs = useMemo(() => {
     const visiblePlatforms = platforms.filter(p => !p.hidden);
@@ -442,26 +180,61 @@ function App() {
   const activeBrowserUrl = activeBrowserPlatform?.url?.trim() || '';
   const activeBrowserNavState = activeTab ? browserNavStates[activeTab] : undefined;
   const activeBrowserDisplayUrl = activeBrowserNavState?.currentUrl || activeBrowserUrl || (isActiveAiChat ? 'AnyBrain AI 对话' : '输入网址或在标签页中打开页面');
-  const activeChatSession = useMemo(
-    () => chatSessions.find(session => session.id === activeChatSessionId) ?? null,
-    [chatSessions, activeChatSessionId]
+  const availableAiModels = useMemo(
+    () => (Array.isArray(aiProvider.models) ? aiProvider.models.filter(model => model.modelId.trim()) : []),
+    [aiProvider.models]
   );
-  const activeChatMessages = activeChatSession?.messages ?? [CHAT_WELCOME_MESSAGE];
-
-  const updateChatSession = (sessionId: string, updater: (session: ChatSession) => ChatSession) => {
-    setChatSessions(prev => prev.map(session => (
-      session.id === sessionId
-        ? updater(session)
-        : session
-    )));
-  };
+  const lastUserMessageId = useMemo(() => {
+    for (let index = activeChatMessages.length - 1; index >= 0; index -= 1) {
+      const message = activeChatMessages[index];
+      if (message.role === 'user') {
+        return message.id;
+      }
+    }
+    return '';
+  }, [activeChatMessages]);
+  const aiModelOptions = useMemo(
+    () => availableAiModels.map(model => ({
+      value: model.modelId,
+      label: model.modelId,
+    })),
+    [availableAiModels]
+  );
 
   const handleCreateChatSession = () => {
-    const nextSession = createChatSession();
-    setChatSessions(prev => [nextSession, ...prev]);
-    setActiveChatSessionId(nextSession.id);
-    setChatError('');
-    setChatInput('');
+    createSession();
+  };
+
+  const handleUploadChatFile = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleAttachmentSelect = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length === 0) return;
+
+    const nextAttachments = await Promise.all(files.map(buildChatAttachment));
+    setChatAttachments(prev => [...prev, ...nextAttachments]);
+    event.target.value = '';
+  };
+
+  const handleRemoveAttachment = (attachmentId: string) => {
+    setChatAttachments(prev => prev.filter(attachment => attachment.id !== attachmentId));
+  };
+
+  const handleSendComposer = async () => {
+    const sent = await sendChat({
+      reasoningEffort: thinkingDepth,
+      attachmentContext: buildAttachmentContext(chatAttachments),
+    });
+
+    if (sent) {
+      setChatAttachments([]);
+    }
+  };
+
+  const handleRetryMessage = async (messageId: string) => {
+    await retryMessage(messageId, thinkingDepth);
   };
 
   useEffect(() => {
@@ -484,14 +257,21 @@ function App() {
         const loadedCommands = Array.isArray(parsed?.shortcutCommands) ? parsed.shortcutCommands : [];
         const loadedCommandSettings = { ...COMMAND_SETTINGS_DEFAULTS, ...(parsed?.shortcutCommandSettings || {}) };
         const loadedAiProvider = normalizeAiProviderSettings(parsed?.aiProvider || {});
+        const loadedChatHistory = parsed?.chatHistory && typeof parsed.chatHistory === 'object'
+          ? parsed.chatHistory as PersistedChatHistory
+          : null;
         setShortcutCommands(loadedCommands);
         setCommandSettings(loadedCommandSettings);
         setAiProvider(loadedAiProvider);
+        setPersistedChatHistory(loadedChatHistory);
+        setChatHistoryLoaded(true);
         setSettingsLoaded(true);
       } catch {
+        setChatHistoryLoaded(true);
         setSettingsLoaded(true);
       }
     }).catch(() => {
+      setChatHistoryLoaded(true);
       setSettingsLoaded(true);
     });
   }, []);
@@ -588,31 +368,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (chatSessions.length === 0) {
-      const nextSession = createChatSession();
-      setChatSessions([nextSession]);
-      setActiveChatSessionId(nextSession.id);
-      return;
-    }
-
-    if (!activeChatSessionId || !chatSessions.some(session => session.id === activeChatSessionId)) {
-      setActiveChatSessionId(chatSessions[0].id);
-    }
-  }, [chatSessions, activeChatSessionId]);
-
-  useEffect(() => {
     if (isActiveAiChat && !showSettings) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [activeChatMessages, isActiveAiChat, showSettings]);
-
-  useEffect(() => {
-    return () => {
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-      }
-    };
-  }, []);
 
   const saveSettings = (next: Record<string, unknown>) => {
     invoke('save_settings', { data: JSON.stringify(next) }).catch(console.error);
@@ -624,6 +383,7 @@ function App() {
     shortcutCommands: ShortcutCommand[];
     shortcutCommandSettings: ShortcutCommandSettings;
     aiProvider: AiProviderSettings;
+    chatHistory: PersistedChatHistory | null;
   }> = {}) => {
     saveSettings({
       useSystemProxy: overrides.useSystemProxy ?? useSystemProxy,
@@ -631,8 +391,29 @@ function App() {
       shortcutCommands: overrides.shortcutCommands ?? shortcutCommands,
       shortcutCommandSettings: overrides.shortcutCommandSettings ?? commandSettings,
       aiProvider: overrides.aiProvider ?? aiProvider,
+      chatHistory: overrides.chatHistory ?? persistedChatHistory,
     });
   };
+
+  useEffect(() => {
+    if (!settingsLoaded || !chatHistoryLoaded || !persistedChatHistory) return;
+
+    if (chatPersistTimeoutRef.current) {
+      window.clearTimeout(chatPersistTimeoutRef.current);
+    }
+
+    chatPersistTimeoutRef.current = window.setTimeout(() => {
+      persistSettings({ chatHistory: persistedChatHistory });
+      chatPersistTimeoutRef.current = null;
+    }, 300);
+
+    return () => {
+      if (chatPersistTimeoutRef.current) {
+        window.clearTimeout(chatPersistTimeoutRef.current);
+        chatPersistTimeoutRef.current = null;
+      }
+    };
+  }, [persistedChatHistory, settingsLoaded, chatHistoryLoaded]);
 
   const updateAiProvider = (partial: Partial<AiProviderSettings>) => {
     setAiProvider(prev => {
@@ -660,6 +441,8 @@ function App() {
 
   const handleUpdateAiModel = (modelId: string, partial: Partial<AiModelConfig>) => {
     const currentModels = Array.isArray(aiProvider.models) ? aiProvider.models : [];
+    const currentModel = currentModels.find(model => model.id === modelId);
+    const previousModelId = currentModel?.modelId ?? '';
     const nextModels = currentModels.map(model => (
       model.id === modelId
         ? {
@@ -669,21 +452,42 @@ function App() {
         }
         : model
     ));
-    const activeExists = nextModels.some(model => model.modelId.trim() && model.modelId === aiProvider.modelId);
+    const updatedModelId = nextModels.find(model => model.id === modelId)?.modelId.trim() ?? '';
+    const fallbackModelId = nextModels.find(model => model.modelId.trim())?.modelId ?? '';
+    const nextActiveModelId = aiProvider.modelId === previousModelId
+      ? (updatedModelId || fallbackModelId)
+      : (nextModels.some(model => model.modelId.trim() && model.modelId === aiProvider.modelId)
+        ? aiProvider.modelId
+        : fallbackModelId);
+    const nextCompressionModelId = aiProvider.compressionModelId === previousModelId
+      ? updatedModelId
+      : (nextModels.some(model => model.modelId.trim() && model.modelId === aiProvider.compressionModelId)
+        ? aiProvider.compressionModelId
+        : '');
+
     updateAiProvider({
       models: nextModels,
-      modelId: activeExists ? aiProvider.modelId : (nextModels.find(model => model.modelId.trim())?.modelId ?? ''),
+      modelId: nextActiveModelId,
+      compressionModelId: nextCompressionModelId,
     });
   };
 
   const handleRemoveAiModel = (modelId: string) => {
     const currentModels = Array.isArray(aiProvider.models) ? aiProvider.models : [];
+    const removedModel = currentModels.find(model => model.id === modelId);
+    const removedModelId = removedModel?.modelId ?? '';
     const nextModels = currentModels.filter(model => model.id !== modelId);
+    const fallbackModelId = nextModels.find(model => model.modelId.trim())?.modelId ?? '';
     updateAiProvider({
       models: nextModels.length > 0 ? nextModels : [createAiModelConfig('', AI_MODEL_CONTEXT_DEFAULT)],
       modelId: nextModels.some(model => model.modelId === aiProvider.modelId)
         ? aiProvider.modelId
-        : (nextModels.find(model => model.modelId.trim())?.modelId ?? ''),
+        : fallbackModelId,
+      compressionModelId: aiProvider.compressionModelId === removedModelId
+        ? ''
+        : (nextModels.some(model => model.modelId === aiProvider.compressionModelId)
+          ? aiProvider.compressionModelId
+          : ''),
     });
   };
 
@@ -864,7 +668,7 @@ function App() {
     }
   };
 
-  const handlePresetSelect = (e: React.ChangeEvent<HTMLSelectElement>) => {
+  const handlePresetSelect = (e: ChangeEvent<HTMLSelectElement>) => {
     const val = e.target.value;
     setSelectedPreset(val);
 
@@ -917,19 +721,13 @@ function App() {
     });
   };
 
-  const handleReloadPlatform = (e: React.MouseEvent, id: string) => {
+  const handleReloadPlatform = (e: MouseEvent, id: string) => {
     e.stopPropagation();
     if (id === AI_CHAT_TAB_ID) {
       if (!activeChatSessionId) {
         handleCreateChatSession();
       } else {
-        updateChatSession(activeChatSessionId, session => ({
-          ...session,
-          title: '新会话',
-          messages: [CHAT_WELCOME_MESSAGE],
-          updatedAt: Date.now(),
-        }));
-        setChatError('');
+        resetActiveSession();
       }
       return;
     }
@@ -956,7 +754,7 @@ function App() {
     });
   };
 
-  const handleCloseTab = (e: React.MouseEvent, id: string) => {
+  const handleCloseTab = (e: MouseEvent, id: string) => {
     e.stopPropagation();
     if (id === AI_CHAT_TAB_ID) {
       updateAiProvider({ enabled: false });
@@ -998,246 +796,6 @@ function App() {
   const handleNavigateForward = () => {
     if (!activeBrowserPlatform) return;
     invoke('navigate_webview_forward', { platformId: activeBrowserPlatform.id }).catch(console.error);
-  };
-
-  const handleCopyMessage = async (messageId: string, content: string) => {
-    try {
-      await navigator.clipboard.writeText(content);
-      setChatCopyState(prev => ({ ...prev, [messageId]: 'success' }));
-    } catch {
-      setChatCopyState(prev => ({ ...prev, [messageId]: 'error' }));
-    } finally {
-      window.setTimeout(() => {
-        setChatCopyState(prev => {
-          const next = { ...prev };
-          delete next[messageId];
-          return next;
-        });
-      }, 1600);
-    }
-  };
-
-  const handleSpeakMessage = (messageId: string, content: string) => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      setChatError('当前环境不支持浏览器朗读。');
-      return;
-    }
-
-    const synth = window.speechSynthesis;
-    const text = content.trim();
-    if (!text) return;
-
-    if (chatSpeakingId === messageId) {
-      synth.cancel();
-      setChatSpeakingId(null);
-      return;
-    }
-
-    synth.cancel();
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = Math.min(Math.max(speechRate, 0.5), 2);
-    utterance.lang = 'zh-CN';
-    utterance.onend = () => setChatSpeakingId((current: string | null) => (current === messageId ? null : current));
-    utterance.onerror = () => {
-      setChatSpeakingId((current: string | null) => (current === messageId ? null : current));
-      setChatError('朗读失败，请检查浏览器语音能力是否可用。');
-    };
-
-    setChatError('');
-    setChatSpeakingId(messageId);
-    synth.speak(utterance);
-  };
-
-  const handleSendChat = async () => {
-    if (chatSending) return;
-    if (!aiProvider.enabled) {
-      setChatError('请先在设置中开启 AI 对话流。');
-      return;
-    }
-    if (!aiProvider.baseUrl.trim() || !aiProvider.apiKey.trim() || !aiProvider.modelId.trim()) {
-      setChatError('请先在设置中配置 baseUrl、apiKey 与 modelId。');
-      return;
-    }
-    const content = chatInput.trim();
-    if (!content) return;
-
-    let targetSessionId = activeChatSessionId;
-    if (!targetSessionId) {
-      const nextSession = createChatSession();
-      setChatSessions([nextSession]);
-      setActiveChatSessionId(nextSession.id);
-      targetSessionId = nextSession.id;
-    }
-
-    const currentSession = chatSessions.find(session => session.id === targetSessionId);
-    const userMessage: ChatMessage = {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      content,
-    };
-    const assistantId = `assistant-${Date.now()}`;
-    const assistantPlaceholder: ChatMessage = {
-      id: assistantId,
-      role: 'assistant',
-      content: '正在思考中…',
-      status: 'streaming'
-    };
-
-    const baseMessages = currentSession?.messages ?? [CHAT_WELCOME_MESSAGE];
-    const nextMessages = [...baseMessages, userMessage];
-    updateChatSession(targetSessionId, session => ({
-      ...session,
-      title: session.messages.length <= 1 ? deriveChatSessionTitle(content) : session.title,
-      messages: [...nextMessages, assistantPlaceholder],
-      updatedAt: Date.now(),
-    }));
-    setChatInput('');
-    setChatSending(true);
-    setChatError('');
-
-    try {
-      const completionUrl = buildChatApiUrl(aiProvider.baseUrl);
-      const responsesUrl = buildResponsesApiUrl(aiProvider.baseUrl);
-      const baseHeaders = {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${aiProvider.apiKey.trim()}`,
-      };
-
-      if (!completionUrl) {
-        throw new Error('Base URL 无效，请检查设置。');
-      }
-
-      const rawBaseUrl = joinBaseUrl(normalizeUrl(aiProvider.baseUrl));
-      const preferResponses = /\/(v\d+\/)?responses$/.test(rawBaseUrl);
-      const requestPlans = preferResponses
-        ? [
-          {
-            label: 'responses',
-            url: responsesUrl,
-            body: buildResponsesPayload(nextMessages, aiProvider.modelId.trim()),
-          },
-          {
-            label: 'chat_completions',
-            url: completionUrl,
-            body: buildChatCompletionsPayload(nextMessages, aiProvider.modelId.trim()),
-          }
-        ]
-        : [
-          {
-            label: 'chat_completions',
-            url: completionUrl,
-            body: buildChatCompletionsPayload(nextMessages, aiProvider.modelId.trim()),
-          }
-        ];
-
-      let reply = '';
-      let handled = false;
-      let lastError = '';
-
-      for (const plan of requestPlans) {
-        if (!plan.url) continue;
-        try {
-          const response = await fetch(plan.url, {
-            method: 'POST',
-            headers: baseHeaders,
-            body: JSON.stringify(plan.body)
-          });
-
-          const contentType = response.headers.get('content-type') || '';
-          const rawText = await response.text();
-          console.log('[AnyBrain][AI] response meta', {
-            mode: plan.label,
-            url: plan.url,
-            status: response.status,
-            ok: response.ok,
-            contentType,
-          });
-          console.log('[AnyBrain][AI] raw response preview', rawText.slice(0, 2000));
-
-          const isSseResponse = contentType.includes('text/event-stream') || rawText.includes('data:');
-          let payload: unknown = null;
-          let currentReply = '';
-
-          if (isSseResponse) {
-            const events = parseSseEventChunks(rawText);
-            console.log('[AnyBrain][AI] parsed sse events', events.slice(0, 20));
-
-            for (const eventData of events) {
-              if (eventData === '[DONE]') break;
-              try {
-                const eventPayload = JSON.parse(eventData) as unknown;
-                const delta = extractStreamingDelta(eventPayload);
-                if (delta) {
-                  currentReply += delta;
-                  updateChatSession(targetSessionId, session => ({
-                    ...session,
-                    messages: session.messages.map(message => (
-                      message.id === assistantId
-                        ? { ...message, content: currentReply, status: 'streaming' }
-                        : message
-                    )),
-                    updatedAt: Date.now(),
-                  }));
-                }
-                payload = eventPayload;
-              } catch (parseError) {
-                console.warn('[AnyBrain][AI] failed to parse sse chunk', eventData, parseError);
-              }
-            }
-          } else {
-            try {
-              payload = rawText ? JSON.parse(rawText) : null;
-            } catch {
-              payload = rawText;
-            }
-            currentReply = typeof payload === 'string'
-              ? payload.trim()
-              : extractAssistantReply(payload);
-          }
-
-          if (!response.ok) {
-            const detail = extractErrorMessage(payload, rawText || `请求失败（${response.status}）`);
-            throw new Error(`HTTP ${response.status}: ${detail}`);
-          }
-
-          reply = currentReply || '接口已返回，但未获取到有效内容。';
-          handled = true;
-          break;
-        } catch (requestError) {
-          lastError = requestError instanceof Error ? requestError.message : String(requestError);
-          console.warn('[AnyBrain][AI] request failed', { mode: plan.label, url: plan.url, error: lastError });
-        }
-      }
-
-      if (!handled) {
-        throw new Error(lastError || '请求失败，请检查模型接口配置。');
-      }
-
-      updateChatSession(targetSessionId, session => ({
-        ...session,
-        messages: session.messages.map(message => (
-          message.id === assistantId
-            ? { ...message, content: reply, status: undefined }
-            : message
-        )),
-        updatedAt: Date.now(),
-      }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setChatError(message);
-      updateChatSession(targetSessionId, session => ({
-        ...session,
-        messages: session.messages.map(item => (
-          item.id === assistantId
-            ? { ...item, content: `请求失败：${message}`, status: 'error' }
-            : item
-        )),
-        updatedAt: Date.now(),
-      }));
-    } finally {
-      setChatSending(false);
-    }
   };
 
   return (
@@ -1507,7 +1065,7 @@ function App() {
           <aside className="ai-workbuddy-sidebar">
             <button className="ai-workbuddy-new-session" onClick={handleCreateChatSession} type="button">
               <Plus size={15} />
-              <span>新开会话</span>
+              <span>开启新会话</span>
             </button>
 
             <div className="ai-workbuddy-session-list">
@@ -1534,7 +1092,7 @@ function App() {
                 {activeChatMessages.map(message => (
                   <article key={message.id} className={`ai-workbuddy-message ${message.role} ${message.status === 'error' ? 'is-error' : ''}`}>
                     <div className="ai-workbuddy-message-meta">
-                      <div className="ai-workbuddy-avatar">
+                      <div className={`ai-workbuddy-avatar ${message.role === 'assistant' && message.status === 'streaming' ? 'is-streaming' : ''}`}>
                         {message.role === 'assistant' ? <Bot size={16} /> : <span>你</span>}
                       </div>
                       <div className="ai-workbuddy-meta-text">
@@ -1543,32 +1101,46 @@ function App() {
                       </div>
                     </div>
 
-                    <div className="ai-workbuddy-bubble-shell">
-                      <div className="ai-workbuddy-bubble-glow" />
-                      <div className="ai-workbuddy-bubble">
-                        <div className="ai-workbuddy-content">{message.content}</div>
+                    <div className="ai-workbuddy-bubble-stack">
+                      <div className="ai-workbuddy-bubble-shell">
+                        <div className="ai-workbuddy-bubble-glow" />
+                        <div className="ai-workbuddy-bubble">
+                          <div className="ai-workbuddy-content">{message.content}</div>
+                        </div>
                       </div>
-                    </div>
 
-                    <div className="ai-workbuddy-actions">
-                      <button
-                        className={`ai-workbuddy-action-btn ${chatCopyState[message.id] ? `is-${chatCopyState[message.id]}` : ''}`}
-                        onClick={() => void handleCopyMessage(message.id, message.content)}
-                        title={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
-                        aria-label={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
-                      >
-                        <Copy size={14} />
-                        <span>{chatCopyState[message.id] === 'success' ? '已复制' : '复制'}</span>
-                      </button>
-                      <button
-                        className={`ai-workbuddy-action-btn ${chatSpeakingId === message.id ? 'is-speaking' : ''}`}
-                        onClick={() => handleSpeakMessage(message.id, message.content)}
-                        title={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
-                        aria-label={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
-                      >
-                        {chatSpeakingId === message.id ? <VolumeX size={14} /> : <Volume2 size={14} />}
-                        <span>{chatSpeakingId === message.id ? '停止' : '朗读'}</span>
-                      </button>
+                      <div className="ai-workbuddy-actions">
+                        {message.role === 'user' && message.id === lastUserMessageId && (
+                          <button
+                            className="ai-workbuddy-action-btn"
+                            onClick={() => void handleRetryMessage(message.id)}
+                            title="重试调用模型"
+                            aria-label="重试调用模型"
+                            disabled={chatSending}
+                          >
+                            <RefreshCw size={12} />
+                            <span>重试</span>
+                          </button>
+                        )}
+                        <button
+                          className={`ai-workbuddy-action-btn ${chatCopyState[message.id] ? `is-${chatCopyState[message.id]}` : ''}`}
+                          onClick={() => void copyMessage(message.id, message.content)}
+                          title={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
+                          aria-label={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
+                        >
+                          <Copy size={12} />
+                          <span>{chatCopyState[message.id] === 'success' ? '已复制' : '复制'}</span>
+                        </button>
+                        <button
+                          className={`ai-workbuddy-action-btn ${chatSpeakingId === message.id ? 'is-speaking' : ''}`}
+                          onClick={() => speakMessage(message.id, message.content)}
+                          title={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
+                          aria-label={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
+                        >
+                          {chatSpeakingId === message.id ? <VolumeX size={12} /> : <Volume2 size={12} />}
+                          <span>{chatSpeakingId === message.id ? '停止' : '朗读'}</span>
+                        </button>
+                      </div>
                     </div>
                   </article>
                 ))}
@@ -1578,64 +1150,109 @@ function App() {
 
             <footer className="ai-workbuddy-composer-wrap">
               <div className="ai-workbuddy-composer">
-                <div className="ai-workbuddy-composer-top">
-                  <div className="ai-workbuddy-composer-icons">
-                    <button className="ai-workbuddy-icon-btn" type="button" onClick={toggleSettings} title="模型配置">
-                      <Bot size={16} />
-                    </button>
-                    <button className="ai-workbuddy-icon-btn" type="button" onClick={toggleSettings} title="能力设置">
-                      <KeyRound size={16} />
-                    </button>
-                  </div>
-                  <div className="ai-workbuddy-composer-session">
-                    <button
-                      className="ai-workbuddy-reset"
-                      onClick={() => {
-                        if (!activeChatSessionId) return;
-                        updateChatSession(activeChatSessionId, session => ({
-                          ...session,
-                          title: '新会话',
-                          messages: [CHAT_WELCOME_MESSAGE],
-                          updatedAt: Date.now(),
-                        }));
-                        setChatError('');
-                      }}
-                    >
-                      <RefreshCw size={14} />
-                      <span>清空当前会话</span>
-                    </button>
-                  </div>
-                </div>
-
                 {chatError && <div className="ai-workbuddy-error">{chatError}</div>}
+
+                {chatAttachments.length > 0 && (
+                  <div className="ai-workbuddy-attachment-list">
+                    {chatAttachments.map(attachment => (
+                      <div key={attachment.id} className="ai-workbuddy-attachment-chip">
+                        <div className="ai-workbuddy-attachment-meta">
+                          <span className="ai-workbuddy-attachment-name">{attachment.name}</span>
+                          <span className="ai-workbuddy-attachment-size">
+                            {formatAttachmentSize(attachment.size)}
+                            {attachment.isTextExtracted ? ' · 已读取' : ' · 元数据'}
+                          </span>
+                        </div>
+                        <button
+                          className="ai-workbuddy-attachment-remove"
+                          type="button"
+                          onClick={() => handleRemoveAttachment(attachment.id)}
+                          aria-label={`移除附件 ${attachment.name}`}
+                          title="移除附件"
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 <div className="ai-workbuddy-input-row">
                   <textarea
                     className="ai-workbuddy-textarea"
-                    placeholder="给 AnyBrain 发送消息…"
+                    placeholder="Ask for follow-up changes"
                     value={chatInput}
                     onChange={e => setChatInput(e.target.value)}
                     onKeyDown={e => {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
-                        void handleSendChat();
+                        void handleSendComposer();
                       }
                     }}
                   />
                 </div>
 
                 <div className="ai-workbuddy-composer-bottom">
-                  <div className="ai-workbuddy-model-pill">
-                    <Bot size={14} />
-                    <span>{aiProvider.modelId.trim() || '未配置模型'}</span>
+                  <div className="ai-workbuddy-composer-controls">
+                    <button
+                      className="ai-workbuddy-icon-btn ai-workbuddy-attach-trigger"
+                      type="button"
+                      onClick={handleUploadChatFile}
+                      title="添加附件"
+                      aria-label="添加附件"
+                    >
+                      <Plus size={16} />
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      className="ai-workbuddy-file-input"
+                      tabIndex={-1}
+                      aria-hidden="true"
+                      multiple
+                      onChange={handleAttachmentSelect}
+                    />
+
+                    <div className="ai-workbuddy-model-pill ai-workbuddy-model-picker">
+                      <Bot size={13} />
+                      <ComposerSelect
+                        title="Select model"
+                        value={aiProvider.modelId}
+                        placeholder="No model"
+                        options={aiModelOptions}
+                        onChange={value => updateAiProvider({ modelId: value })}
+                        disabled={aiModelOptions.length === 0}
+                        className="ai-workbuddy-composer-select"
+                      />
+                    </div>
+
+                    <div className="ai-workbuddy-model-pill ai-workbuddy-depth-picker">
+                      <Brain size={13} />
+                      <ComposerSelect
+                        title="Reasoning effort"
+                        value={thinkingDepth}
+                        placeholder="High"
+                        options={THINKING_DEPTH_OPTIONS}
+                        onChange={value => setThinkingDepth(value as ThinkingDepth)}
+                        className="ai-workbuddy-composer-select"
+                      />
+                    </div>
                   </div>
-                  <button className="ai-workbuddy-send" disabled={chatSending || !chatInput.trim()} onClick={() => void handleSendChat()}>
-                    <SendHorizonal size={16} />
+
+                  <p className="ai-workbuddy-disclaimer ai-workbuddy-disclaimer-inline">AnyBrain 可能偶尔会产生不准确的信息，重要内容请注意核实。</p>
+
+                  <button
+                    className={`ai-workbuddy-send-btn ${chatSending ? 'is-sending' : ''}`}
+                    type="button"
+                    onClick={() => void handleSendComposer()}
+                    disabled={chatSending || (!chatInput.trim() && chatAttachments.length === 0)}
+                    aria-label={chatSending ? '发送中' : '发送消息'}
+                    title={chatSending ? '发送中' : '发送消息'}
+                  >
+                    {chatSending ? <Square size={16} /> : <ArrowUp size={18} />}
                   </button>
                 </div>
               </div>
-
-              <p className="ai-workbuddy-disclaimer">AnyBrain 可能偶尔会产生不准确的信息，重要内容请注意核实。</p>
             </footer>
           </section>
         </main>
@@ -1659,510 +1276,103 @@ function App() {
         }}
       />
 
-      <div className={`settings-backdrop ${showSettings ? 'open' : ''}`} onClick={toggleSettings} />
-      <div className={`settings-panel ${showSettings ? 'open' : ''}`}>
-        <div className="panel-header">
-          <h3>管理标签页与能力设置</h3>
-          <button className="icon-button" onClick={toggleSettings}>
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="panel-list">
-          {platforms.length === 0 ? (
-            <div className="empty-panel-msg">暂无标签页</div>
-          ) : (
-            platforms.map((p, index) => (
-              <div
-                key={p.id}
-                className={`panel-item ${p.hidden ? 'is-hidden' : ''}`}
-                onClick={() => {
-                  if (p.hidden) {
-                    setPlatforms(prev => prev.map(item => item.id === p.id ? { ...item, hidden: false } : item));
-                    setActiveTab(p.id);
-                  }
-                }}
-                style={{ cursor: p.hidden ? 'pointer' : 'default' }}
-                title={p.hidden ? '点击重新显示并打开' : ''}
-              >
-                <div className="panel-item-info">
-                  <PlatformIcon platformId={p.id} platformName={p.name} url={p.url} size={16} />
-                  <span className="panel-item-name">{p.name}</span>
-                  {p.hidden && <span className="panel-hidden-badge">已收起</span>}
-                </div>
-                <div className="panel-item-actions" onClick={e => e.stopPropagation()}>
-                  <button
-                    className="panel-item-action-btn"
-                    onClick={() => handleMovePlatform(index, 'up')}
-                    disabled={index === 0}
-                    title="上移"
-                  >
-                    <ChevronUp size={16} />
-                  </button>
-                  <button
-                    className="panel-item-action-btn"
-                    onClick={() => handleMovePlatform(index, 'down')}
-                    disabled={index === platforms.length - 1}
-                    title="下移"
-                  >
-                    <ChevronDown size={16} />
-                  </button>
-                  <button
-                    className="panel-item-delete"
-                    onClick={() => handleRemovePlatform(p.id)}
-                    title="删除"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              </div>
-            ))
-          )}
-
-          {!showAddForm ? (
-            <button className="panel-add-btn" onClick={() => setShowAddForm(true)}>
-              <Plus size={16} />
-              <span>添加新标签</span>
-            </button>
-          ) : (
-            <div className="add-form">
-              <div className="select-container">
-                <select
-                  className="add-select"
-                  value={selectedPreset}
-                  onChange={handlePresetSelect}
-                >
-                  <option value="" disabled>选择 AI 平台</option>
-                  {POPULAR_PLATFORMS.map((p, i) => (
-                    <option key={i} value={i}>{p.name}</option>
-                  ))}
-                  <option value="custom">自定义标签页</option>
-                </select>
-                <ChevronDown className="select-icon" size={16} />
-              </div>
-
-              {selectedPreset === 'custom' && (
-                <>
-                  <input
-                    className="add-input"
-                    placeholder="名称（如 DeepSeek）"
-                    value={newName}
-                    onChange={e => setNewName(e.target.value)}
-                    autoFocus
-                  />
-                  <input
-                    className="add-input"
-                    placeholder="网址（如 https://chat.deepseek.com）"
-                    value={newUrl}
-                    onChange={e => setNewUrl(e.target.value)}
-                    onFocus={() => {
-                      if (!newUrl.trim()) setNewUrl('https://');
-                    }}
-                    onBlur={() => {
-                      if (newUrl.trim()) setNewUrl(normalizeUrl(newUrl));
-                    }}
-                    onKeyDown={e => e.key === 'Enter' && handleAddPlatform()}
-                  />
-                </>
-              )}
-
-              <div className="add-form-actions">
-                <button className="add-form-cancel" onClick={() => {
-                  setShowAddForm(false);
-                  resetAddForm();
-                }}>取消</button>
-                <button
-                  className="add-form-confirm"
-                  onClick={handleAddPlatform}
-                  disabled={!newName.trim() || !newUrl.trim()}
-                >
-                  添加
-                </button>
-              </div>
-            </div>
-          )}
-
-          <div className="panel-divider" />
-
-          <div className="panel-section-header">
-            <div className="panel-section-title">AI 对话流</div>
-          </div>
-
-          <div className="panel-ai-card">
-            <div className="panel-ai-card-row">
-              <div>
-                <div className="panel-ai-title">开启 AI 对话页</div>
-                <div className="panel-ai-desc">打开后会在顶部新增一个独立的现代感 AI 对话流页面。</div>
-              </div>
-              <button
-                className={`toggle-switch ${aiProvider.enabled ? 'active' : ''}`}
-                onClick={() => {
-                  const enabled = !aiProvider.enabled;
-                  updateAiProvider({ enabled });
-                  if (enabled) {
-                    setActiveTab(AI_CHAT_TAB_ID);
-                    invoke('hide_all_webviews').catch(console.error);
-                  } else if (activeTab === AI_CHAT_TAB_ID) {
-                    const fallback = platforms.filter(p => !p.hidden)[0]?.id || tempTabs[0]?.id || '';
-                    setActiveTab(fallback);
-                  }
-                }}
-                role="switch"
-                aria-checked={aiProvider.enabled}
-              >
-                <span className="toggle-knob" />
-              </button>
-            </div>
-
-            <div className="panel-ai-grid">
-              <label className="panel-ai-field">
-                <span>Base URL</span>
-                <div className="panel-ai-input-wrap">
-                  <Globe size={14} />
-                  <input
-                    className="add-input panel-ai-input"
-                    placeholder="如 https://api.openai.com/v1"
-                    value={aiProvider.baseUrl}
-                    onChange={e => updateAiProvider({ baseUrl: e.target.value })}
-                  />
-                </div>
-              </label>
-
-              <label className="panel-ai-field">
-                <span>API Key</span>
-                <div className="panel-ai-input-wrap">
-                  <KeyRound size={14} />
-                  <input
-                    className="add-input panel-ai-input"
-                    type="password"
-                    placeholder="输入你的 API Key"
-                    value={aiProvider.apiKey}
-                    onChange={e => updateAiProvider({ apiKey: e.target.value })}
-                  />
-                </div>
-              </label>
-            </div>
-
-            <div className="panel-ai-model-selector">
-              <div className="panel-section-header panel-section-header-tight">
-                <div>
-                  <div className="panel-ai-title">当前使用模型</div>
-                  <div className="panel-ai-desc">聊天页会使用这里选中的模型发送请求。</div>
-                </div>
-              </div>
-              <div className="select-container panel-ai-select-wrap">
-                <select
-                  className="panel-select panel-ai-select"
-                  value={aiProvider.modelId}
-                  onChange={e => updateAiProvider({ modelId: e.target.value })}
-                >
-                  <option value="">请选择模型</option>
-                  {(Array.isArray(aiProvider.models) ? aiProvider.models : []).map(model => (
-                    <option key={model.id} value={model.modelId} disabled={!model.modelId.trim()}>
-                      {model.modelId.trim() || '未填写 Model ID'} · {model.contextLength.trim() || AI_MODEL_CONTEXT_DEFAULT}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown className="select-icon" size={14} />
-              </div>
-            </div>
-
-            <div className="panel-ai-models">
-              <div className="panel-section-header panel-section-header-tight">
-                <div>
-                  <div className="panel-ai-title">模型列表</div>
-                  <div className="panel-ai-desc">可添加多个 Model ID，并为每个模型单独定义上下文长度。</div>
-                </div>
-                {!showAiModelAddForm && (
-                  <button className="panel-item-action-btn panel-ai-add-inline" onClick={() => setShowAiModelAddForm(true)}>
-                    <Plus size={14} />
-                    <span>添加模型</span>
-                  </button>
-                )}
-              </div>
-
-              <div className="panel-ai-model-list">
-                {(Array.isArray(aiProvider.models) ? aiProvider.models : []).map((model, index) => {
-                  const isActiveModel = model.modelId.trim() && model.modelId === aiProvider.modelId;
-                  return (
-                    <div key={model.id} className={`panel-ai-model-item ${isActiveModel ? 'is-active' : ''}`}>
-                      <div className="panel-ai-model-head">
-                        <div className="panel-ai-model-meta">
-                          <span className="panel-ai-model-index">模型 {index + 1}</span>
-                          {isActiveModel && <span className="panel-ai-model-badge">当前</span>}
-                        </div>
-                        <button
-                          className="panel-item-delete"
-                          onClick={() => handleRemoveAiModel(model.id)}
-                          title="删除模型"
-                          aria-label="删除模型"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-
-                      <div className="panel-ai-model-grid">
-                        <label className="panel-ai-field">
-                          <span>Model ID</span>
-                          <div className="panel-ai-input-wrap">
-                            <Bot size={14} />
-                            <input
-                              className="add-input panel-ai-input"
-                              placeholder="如 gpt-4.1-mini / deepseek-chat"
-                              value={model.modelId}
-                              onChange={e => handleUpdateAiModel(model.id, { modelId: e.target.value })}
-                            />
-                          </div>
-                        </label>
-
-                        <label className="panel-ai-field">
-                          <span>上下文长度</span>
-                          <input
-                            className="add-input panel-ai-input panel-ai-context-input"
-                            placeholder="默认 200k"
-                            value={model.contextLength}
-                            onChange={e => handleUpdateAiModel(model.id, { contextLength: e.target.value })}
-                            onBlur={e => {
-                              if (!e.target.value.trim()) handleUpdateAiModel(model.id, { contextLength: AI_MODEL_CONTEXT_DEFAULT });
-                            }}
-                          />
-                        </label>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {showAiModelAddForm && (
-                <div className="add-form panel-ai-add-form">
-                  <input
-                    className="add-input panel-ai-input"
-                    placeholder="新增 Model ID"
-                    value={aiModelDraft}
-                    onChange={e => setAiModelDraft(e.target.value)}
-                    autoFocus
-                  />
-                  <input
-                    className="add-input panel-ai-input"
-                    placeholder="上下文长度，默认 200k"
-                    value={aiContextDraft}
-                    onChange={e => setAiContextDraft(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && handleAddAiModel()}
-                  />
-                  <div className="add-form-actions">
-                    <button className="add-form-cancel" onClick={() => {
-                      setShowAiModelAddForm(false);
-                      resetAiModelDraft();
-                    }}>取消</button>
-                    <button className="add-form-confirm" onClick={handleAddAiModel} disabled={!aiModelDraft.trim()}>
-                      添加模型
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="panel-ai-tips">
-              保存方式为自动持久化；推荐填写兼容 OpenAI Chat Completions 的接口地址。每个模型的上下文长度默认值为 200k。
-            </div>
-          </div>
-
-          <div className="panel-divider" />
-
-          <div className="panel-section-header">
-            <div className="panel-section-title">语音朗读</div>
-          </div>
-
-          <div className="panel-setting-item">
-            <span className="panel-setting-label">语音朗读速度</span>
-            <div className="panel-setting-control panel-setting-control-rate">
-              <input
-                className="panel-range"
-                type="range"
-                min={0.7}
-                max={1.3}
-                step={0.05}
-                value={speechRate}
-                onChange={e => {
-                  const nextRate = Number.parseFloat(e.target.value);
-                  setSpeechRate(nextRate);
-                  invoke('set_tts_rate', { rate: nextRate }).catch(console.error);
-                  persistSettings({ speechRate: nextRate });
-                }}
-              />
-              <input
-                className="panel-number"
-                type="number"
-                min={0.7}
-                max={1.3}
-                step={0.05}
-                value={speechRate}
-                onChange={e => {
-                  const nextRate = Number.parseFloat(e.target.value || '0');
-                  if (Number.isNaN(nextRate)) return;
-                  const clamped = Math.min(1.3, Math.max(0.7, nextRate));
-                  setSpeechRate(clamped);
-                  invoke('set_tts_rate', { rate: clamped }).catch(console.error);
-                  persistSettings({ speechRate: clamped });
-                }}
-              />
-            </div>
-          </div>
-
-          <div className="panel-divider" />
-
-          <div className="panel-section-header">
-            <div className="panel-section-title">快捷命令</div>
-          </div>
-
-          <div className="panel-setting-item">
-            <span className="panel-setting-label">默认执行方式</span>
-            <div className="panel-setting-control">
-              <select
-                className="panel-select"
-                value={commandSettings.defaultExecMode}
-                onChange={e => updateCommandSettings({ defaultExecMode: e.target.value as ExecMode })}
-              >
-                {EXEC_MODE_OPTIONS.map(option => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-              <ChevronDown className="select-icon" size={14} />
-            </div>
-          </div>
-
-          {shortcutCommands.length === 0 ? (
-            <div className="empty-panel-msg">暂无快捷命令</div>
-          ) : (
-            shortcutCommands.map(command => {
-              const execMode = resolveCommandExecMode(command);
-              const output = commandOutputs[command.id];
-              const expanded = expandedCommandOutputs[command.id];
-              const status = commandStatuses[command.id];
-              return (
-                <div key={command.id} className="panel-command-item">
-                  <div className="panel-command-row">
-                    <div className="panel-command-info">
-                      <span className="panel-command-name">{command.name}</span>
-                      <span className="panel-command-text">{command.cmd}</span>
-                    </div>
-                    <div className="panel-command-actions">
-                      <div className="panel-command-select">
-                        <select
-                          className="panel-select"
-                          value={command.execMode ?? 'inherit'}
-                          onChange={e => handleCommandExecModeChange(command.id, e.target.value as CommandExecMode)}
-                        >
-                          <option value="inherit">跟随默认</option>
-                          {EXEC_MODE_OPTIONS.map(option => (
-                            <option key={option.value} value={option.value}>{option.label}</option>
-                          ))}
-                        </select>
-                        <ChevronDown className="select-icon" size={14} />
-                      </div>
-                      <button
-                        className={`panel-command-run ${status ? `is-${status}` : ''}`}
-                        onClick={() => handleExecuteCommand(command)}
-                      >
-                        {status ? COMMAND_STATUS_LABELS[status] : '执行'}
-                      </button>
-                      <button
-                        className="panel-item-delete"
-                        onClick={() => handleRemoveShortcutCommand(command.id)}
-                        title="删除"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  </div>
-                  {execMode === 'shell_with_output' && output && (
-                    <div className="panel-command-output">
-                      <button
-                        className="panel-command-output-toggle"
-                        onClick={() => setExpandedCommandOutputs(prev => ({ ...prev, [command.id]: !expanded }))}
-                      >
-                        <span>{expanded ? '收起输出' : '展开输出'}</span>
-                        <ChevronDown size={14} className={expanded ? 'is-expanded' : ''} />
-                      </button>
-                      {expanded && (
-                        <div className="panel-command-output-body">
-                          {output.output && (
-                            <pre className="panel-command-output-text">{output.output}</pre>
-                          )}
-                          {output.error && (
-                            <pre className="panel-command-output-error">{output.error}</pre>
-                          )}
-                          {output.exitCode !== null && (
-                            <div className="panel-command-output-exit">退出码：{output.exitCode}</div>
-                          )}
-                          {!output.output && !output.error && (
-                            <div className="panel-command-output-empty">无输出</div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })
-          )}
-
-          {!showCommandAddForm ? (
-            <button className="panel-add-btn" onClick={() => setShowCommandAddForm(true)}>
-              <Plus size={16} />
-              <span>添加快捷命令</span>
-            </button>
-          ) : (
-            <div className="add-form">
-              <input
-                className="add-input"
-                placeholder="名称（如 清理缓存）"
-                value={commandDraftName}
-                onChange={e => setCommandDraftName(e.target.value)}
-                autoFocus
-              />
-              <input
-                className="add-input"
-                placeholder="命令（如 npm run build）"
-                value={commandDraftValue}
-                onChange={e => setCommandDraftValue(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleAddShortcutCommand()}
-              />
-              <div className="add-form-actions">
-                <button className="add-form-cancel" onClick={() => {
-                  setShowCommandAddForm(false);
-                  resetCommandDraft();
-                }}>取消</button>
-                <button
-                  className="add-form-confirm"
-                  onClick={handleAddShortcutCommand}
-                  disabled={!commandDraftName.trim() || !commandDraftValue.trim()}
-                >
-                  添加
-                </button>
-              </div>
-            </div>
-          )}
-
-          <div className="panel-divider" />
-
-          <div className="panel-setting-item">
-            <span className="panel-setting-label">使用系统代理</span>
-            <button
-              className={`toggle-switch ${useSystemProxy ? 'active' : ''}`}
-              onClick={() => {
-                const newVal = !useSystemProxy;
-                setUseSystemProxy(newVal);
-                persistSettings({ useSystemProxy: newVal });
-              }}
-              role="switch"
-              aria-checked={useSystemProxy}
-            >
-              <span className="toggle-knob" />
-            </button>
-          </div>
-        </div>
-      </div>
+      <SettingsPanel
+        showSettings={showSettings}
+        onClose={toggleSettings}
+        platforms={platforms}
+        activeTab={activeTab}
+        onRestorePlatform={platformId => {
+          setPlatforms(prev => prev.map(item => item.id === platformId ? { ...item, hidden: false } : item));
+          setActiveTab(platformId);
+        }}
+        onMovePlatform={handleMovePlatform}
+        onRemovePlatform={handleRemovePlatform}
+        renderPlatformIcon={platform => <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={16} />}
+        showAddForm={showAddForm}
+        onShowAddForm={() => setShowAddForm(true)}
+        selectedPreset={selectedPreset}
+        popularPlatforms={POPULAR_PLATFORMS}
+        onPresetSelect={value => handlePresetSelect({ target: { value } } as ChangeEvent<HTMLSelectElement>)}
+        newName={newName}
+        onNewNameChange={setNewName}
+        newUrl={newUrl}
+        onNewUrlChange={setNewUrl}
+        onNewUrlFocus={() => {
+          if (!newUrl.trim()) setNewUrl('https://');
+        }}
+        onNewUrlBlur={() => {
+          if (newUrl.trim()) setNewUrl(normalizeUrl(newUrl));
+        }}
+        onAddPlatform={handleAddPlatform}
+        onCancelAddPlatform={() => {
+          setShowAddForm(false);
+          resetAddForm();
+        }}
+        aiChatTabId={AI_CHAT_TAB_ID}
+        aiProvider={aiProvider}
+        onToggleAiEnabled={() => {
+          const enabled = !aiProvider.enabled;
+          updateAiProvider({ enabled });
+          if (enabled) {
+            setActiveTab(AI_CHAT_TAB_ID);
+            invoke('hide_all_webviews').catch(console.error);
+          } else if (activeTab === AI_CHAT_TAB_ID) {
+            const fallback = platforms.filter(p => !p.hidden)[0]?.id || tempTabs[0]?.id || '';
+            setActiveTab(fallback);
+          }
+        }}
+        onUpdateAiProvider={updateAiProvider}
+        showAiModelAddForm={showAiModelAddForm}
+        onShowAiModelAddForm={() => setShowAiModelAddForm(true)}
+        onCancelAiModelAddForm={() => {
+          setShowAiModelAddForm(false);
+          resetAiModelDraft();
+        }}
+        aiModelDraft={aiModelDraft}
+        onAiModelDraftChange={setAiModelDraft}
+        aiContextDraft={aiContextDraft}
+        onAiContextDraftChange={setAiContextDraft}
+        onAddAiModel={handleAddAiModel}
+        onUpdateAiModel={handleUpdateAiModel}
+        onRemoveAiModel={handleRemoveAiModel}
+        aiModelContextDefault={AI_MODEL_CONTEXT_DEFAULT}
+        commandSettings={commandSettings}
+        execModeOptions={EXEC_MODE_OPTIONS}
+        onUpdateCommandSettings={partial => updateCommandSettings(partial)}
+        shortcutCommands={shortcutCommands}
+        commandOutputs={commandOutputs}
+        expandedCommandOutputs={expandedCommandOutputs}
+        commandStatuses={commandStatuses}
+        commandStatusLabels={COMMAND_STATUS_LABELS}
+        onToggleCommandOutput={commandId => setExpandedCommandOutputs(prev => ({ ...prev, [commandId]: !prev[commandId] }))}
+        onCommandExecModeChange={(commandId, execMode) => handleCommandExecModeChange(commandId, execMode ?? 'inherit')}
+        onExecuteCommand={handleExecuteCommand}
+        onRemoveShortcutCommand={handleRemoveShortcutCommand}
+        resolveCommandExecMode={resolveCommandExecMode}
+        showCommandAddForm={showCommandAddForm}
+        onShowCommandAddForm={() => setShowCommandAddForm(true)}
+        onCancelCommandAddForm={() => {
+          setShowCommandAddForm(false);
+          resetCommandDraft();
+        }}
+        commandDraftName={commandDraftName}
+        onCommandDraftNameChange={setCommandDraftName}
+        commandDraftValue={commandDraftValue}
+        onCommandDraftValueChange={setCommandDraftValue}
+        onAddShortcutCommand={handleAddShortcutCommand}
+        speechRate={speechRate}
+        onSpeechRateChange={value => {
+          setSpeechRate(value);
+          invoke('set_tts_rate', { rate: value }).catch(console.error);
+          persistSettings({ speechRate: value });
+        }}
+        useSystemProxy={useSystemProxy}
+        onToggleSystemProxy={() => {
+          const newVal = !useSystemProxy;
+          setUseSystemProxy(newVal);
+          persistSettings({ useSystemProxy: newVal });
+        }}
+      />
     </div>
   );
 }
