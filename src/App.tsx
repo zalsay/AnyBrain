@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
-import { ArrowLeft, ArrowRight, ArrowUp, Bot, Brain, Copy, Globe, Home, Plus, RefreshCw, Sparkles, Square, Volume2, VolumeX, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowUp, Bot, Brain, Copy, Globe, Home, Plus, RefreshCw, Sparkles, Square, Star, Volume2, VolumeX, X } from 'lucide-react';
 import ComposerSelect from './components/chat/ComposerSelect';
 import SettingsPanel from './components/settings/SettingsPanel';
 import {
@@ -102,6 +102,74 @@ function buildAttachmentContext(attachments: ChatAttachment[]) {
   ].join('\n\n');
 }
 
+type RenderContentBlock =
+  | { type: 'text'; content: string }
+  | { type: 'code'; content: string; language: string };
+
+function parseMessageContentBlocks(content: string): RenderContentBlock[] {
+  const normalized = content.replace(/\r\n/g, '\n');
+  const blocks: RenderContentBlock[] = [];
+  const codeBlockPattern = /```([^\n`]*)\n?([\s\S]*?)```/g;
+  let lastIndex = 0;
+
+  for (const match of normalized.matchAll(codeBlockPattern)) {
+    const matchIndex = match.index ?? 0;
+    const [fullMatch, language = '', codeContent = ''] = match;
+
+    if (matchIndex > lastIndex) {
+      const textContent = normalized.slice(lastIndex, matchIndex);
+      if (textContent) {
+        blocks.push({ type: 'text', content: textContent });
+      }
+    }
+
+    blocks.push({
+      type: 'code',
+      language: language.trim(),
+      content: codeContent.replace(/\n$/, ''),
+    });
+    lastIndex = matchIndex + fullMatch.length;
+  }
+
+  if (lastIndex < normalized.length) {
+    const textContent = normalized.slice(lastIndex);
+    if (textContent) {
+      blocks.push({ type: 'text', content: textContent });
+    }
+  }
+
+  return blocks.length > 0 ? blocks : [{ type: 'text', content: normalized }];
+}
+
+function renderInlineCode(content: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const inlineCodePattern = /`([^`\n]+)`/g;
+  let lastIndex = 0;
+
+  for (const match of content.matchAll(inlineCodePattern)) {
+    const matchIndex = match.index ?? 0;
+    if (matchIndex > lastIndex) {
+      nodes.push(content.slice(lastIndex, matchIndex));
+    }
+
+    nodes.push(
+      <code
+        key={`inline-code-${matchIndex}-${match[1]}`}
+        className="ai-workbuddy-inline-code"
+      >
+        {match[1]}
+      </code>
+    );
+    lastIndex = matchIndex + match[0].length;
+  }
+
+  if (lastIndex < content.length) {
+    nodes.push(content.slice(lastIndex));
+  }
+
+  return nodes.length > 0 ? nodes : [content];
+}
+
 function App() {
   const [platforms, setPlatforms] = useState<Platform[]>([]);
   const [tempTabs, setTempTabs] = useState<Platform[]>([]);
@@ -140,6 +208,7 @@ function App() {
   const [quickAddPosition, setQuickAddPosition] = useState({ top: 0, left: 0 });
   const [thinkingDepth, setThinkingDepth] = useState<ThinkingDepth>('high');
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
+  const [codeBlockCopyState, setCodeBlockCopyState] = useState<Record<string, 'success' | 'error'>>({});
   const {
     chatSessions,
     activeChatSessionId,
@@ -177,9 +246,30 @@ function App() {
     () => tempTabs.find(p => p.id === activeTab) || platforms.find(p => p.id === activeTab) || null,
     [activeTab, platforms, tempTabs]
   );
+  const activePinnedPlatform = useMemo(
+    () => platforms.find(platform => platform.id === activeTab) ?? null,
+    [platforms, activeTab]
+  );
+  const activeTempPlatform = useMemo(
+    () => tempTabs.find(platform => platform.id === activeTab) ?? null,
+    [tempTabs, activeTab]
+  );
   const activeBrowserUrl = activeBrowserPlatform?.url?.trim() || '';
   const activeBrowserNavState = activeTab ? browserNavStates[activeTab] : undefined;
   const activeBrowserDisplayUrl = activeBrowserNavState?.currentUrl || activeBrowserUrl || (isActiveAiChat ? 'AnyBrain AI 对话' : '输入网址或在标签页中打开页面');
+  const activeFavoriteUrl = useMemo(
+    () => normalizeUrl(activeBrowserNavState?.currentUrl || activeBrowserUrl),
+    [activeBrowserNavState?.currentUrl, activeBrowserUrl]
+  );
+  const matchingPinnedPlatform = useMemo(
+    () => {
+      if (!activeFavoriteUrl) return null;
+      return platforms.find(platform => normalizeUrl(platform.url) === activeFavoriteUrl) ?? null;
+    },
+    [platforms, activeFavoriteUrl]
+  );
+  const isActiveTabFavorited = Boolean(activePinnedPlatform || matchingPinnedPlatform);
+  const canFavoriteActiveTab = !isActiveAiChat && Boolean(activeBrowserPlatform && activeFavoriteUrl);
   const availableAiModels = useMemo(
     () => (Array.isArray(aiProvider.models) ? aiProvider.models.filter(model => model.modelId.trim()) : []),
     [aiProvider.models]
@@ -235,6 +325,62 @@ function App() {
 
   const handleRetryMessage = async (messageId: string) => {
     await retryMessage(messageId, thinkingDepth);
+  };
+
+  const copyCodeBlock = async (blockId: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCodeBlockCopyState(prev => ({ ...prev, [blockId]: 'success' }));
+    } catch {
+      setCodeBlockCopyState(prev => ({ ...prev, [blockId]: 'error' }));
+    } finally {
+      window.setTimeout(() => {
+        setCodeBlockCopyState(prev => {
+          const next = { ...prev };
+          delete next[blockId];
+          return next;
+        });
+      }, 1600);
+    }
+  };
+
+  const renderMessageContent = (messageId: string, content: string) => {
+    const blocks = parseMessageContentBlocks(content);
+
+    return blocks.map((block, index) => {
+      if (block.type === 'code') {
+        const blockId = `${messageId}-code-${index}`;
+        const copyState = codeBlockCopyState[blockId];
+        const copyLabel = copyState === 'success' ? '已复制' : copyState === 'error' ? '复制失败' : '复制';
+
+        return (
+          <div key={blockId} className="ai-workbuddy-code-block">
+            <div className="ai-workbuddy-code-header">
+              <span className="ai-workbuddy-code-language">{block.language || 'code'}</span>
+              <button
+                className={`ai-workbuddy-code-copy-btn ${copyState ? `is-${copyState}` : ''}`}
+                type="button"
+                onClick={() => void copyCodeBlock(blockId, block.content)}
+                title={copyLabel}
+                aria-label={copyLabel}
+              >
+                <Copy size={12} />
+                <span>{copyLabel}</span>
+              </button>
+            </div>
+            <pre className="ai-workbuddy-code-pre">
+              <code>{block.content}</code>
+            </pre>
+          </div>
+        );
+      }
+
+      return (
+        <div key={`${messageId}-text-${index}`} className="ai-workbuddy-text-block">
+          {renderInlineCode(block.content)}
+        </div>
+      );
+    });
   };
 
   useEffect(() => {
@@ -709,6 +855,50 @@ function App() {
     setActiveTab(id);
   };
 
+  const handleFavoriteActiveTab = () => {
+    if (!activeBrowserPlatform || isActiveAiChat) return;
+
+    const favoriteUrl = activeFavoriteUrl;
+    if (!favoriteUrl) return;
+
+    const duplicatePlatform = platforms.find(platform => normalizeUrl(platform.url) === favoriteUrl) ?? null;
+    if (duplicatePlatform) {
+      if (duplicatePlatform.hidden) {
+        setPlatforms(prev => prev.map(platform => (
+          platform.id === duplicatePlatform.id
+            ? { ...platform, hidden: false }
+            : platform
+        )));
+      }
+
+      if (activeTempPlatform) {
+        invoke('destroy_webview', { platformId: activeTempPlatform.id }).catch(console.error);
+        setTempTabs(prev => prev.filter(platform => platform.id !== activeTempPlatform.id));
+      }
+
+      setActiveTab(duplicatePlatform.id);
+      return;
+    }
+
+    const nextName = activeBrowserPlatform.name.trim() && activeBrowserPlatform.name !== '新标签'
+      ? activeBrowserPlatform.name.trim()
+      : deriveNameFromUrl(favoriteUrl);
+    const nextPlatform: Platform = {
+      id: `${nextName.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`,
+      name: nextName,
+      url: favoriteUrl,
+    };
+
+    setPlatforms(prev => [...prev, nextPlatform]);
+
+    if (activeTempPlatform) {
+      invoke('destroy_webview', { platformId: activeTempPlatform.id }).catch(console.error);
+      setTempTabs(prev => prev.filter(platform => platform.id !== activeTempPlatform.id));
+    }
+
+    setActiveTab(nextPlatform.id);
+  };
+
   const handleRemovePlatform = (id: string) => {
     invoke('destroy_webview', { platformId: id }).catch(console.error);
     setPlatforms(prev => {
@@ -1042,6 +1232,16 @@ function App() {
             >
               <Home size={16} />
             </button>
+            <button
+              className={`browser-toolbar-btn ${isActiveTabFavorited ? 'is-active' : ''}`}
+              type="button"
+              aria-label={activePinnedPlatform ? '当前标签已收藏' : matchingPinnedPlatform ? '跳转到已收藏标签' : '保存到固定标签页'}
+              title={activePinnedPlatform ? '当前标签已收藏' : matchingPinnedPlatform ? '跳转到已收藏标签' : '保存到固定标签页'}
+              onClick={handleFavoriteActiveTab}
+              disabled={!canFavoriteActiveTab || Boolean(activePinnedPlatform)}
+            >
+              <Star size={16} />
+            </button>
           </div>
 
           <div className={`browser-toolbar-address ${isActiveAiChat ? 'is-ai-chat' : ''}`}>
@@ -1105,7 +1305,7 @@ function App() {
                       <div className="ai-workbuddy-bubble-shell">
                         <div className="ai-workbuddy-bubble-glow" />
                         <div className="ai-workbuddy-bubble">
-                          <div className="ai-workbuddy-content">{message.content}</div>
+                          <div className="ai-workbuddy-content">{renderMessageContent(message.id, message.content)}</div>
                         </div>
                       </div>
 
