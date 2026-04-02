@@ -272,13 +272,112 @@ textarea {
 .settings-logo-btn {
   width: 34px;
   height: 34px;
-  margin: 0 6px 2px 0;
+  margin: 0 4px 2px 0;
+}
+
+.hidden-tabs-trigger {
+  width: 34px;
+  height: 34px;
+  margin: 0 8px 2px 0;
+  flex: 0 0 auto;
+}
+
+.hidden-tabs-trigger.is-active {
+  color: #dfffee;
+  background: rgba(0, 227, 138, 0.1);
+  border-color: rgba(0, 227, 138, 0.18);
+}
+
+.titlebar-leading {
+  position: relative;
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  flex: 0 0 auto;
+  z-index: 3;
+}
+
+.titlebar-leading.has-hidden-panel {
+  margin-right: 8px;
 }
 
 .app-logo-small {
   width: 20px;
   height: 20px;
   object-fit: contain;
+}
+
+.hidden-tabs-inline-panel {
+  position: absolute;
+  left: calc(100% - 2px);
+  bottom: 2px;
+  height: 34px;
+  max-width: min(560px, calc(100vw - 260px));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 10px;
+  border-radius: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(24, 27, 27, 0.98), rgba(16, 18, 18, 0.96)),
+    linear-gradient(145deg, rgba(20, 40, 32, 0.44), rgba(10, 12, 12, 0.88));
+  box-shadow:
+    0 16px 34px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(24px) saturate(155%);
+  -webkit-backdrop-filter: blur(24px) saturate(155%);
+}
+
+.hidden-tabs-inline-title {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: #e6fff2;
+  white-space: nowrap;
+}
+
+.hidden-tabs-inline-empty {
+  min-width: 0;
+  color: #8da49b;
+  font-size: 12px;
+}
+
+.hidden-tabs-inline-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.hidden-tabs-inline-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 180px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #e8f8ef;
+  cursor: pointer;
+  transition: all 0.16s ease;
+  white-space: nowrap;
+}
+
+.hidden-tabs-inline-item:hover {
+  background: rgba(0, 227, 138, 0.12);
+  border-color: rgba(0, 227, 138, 0.18);
+}
+
+.hidden-tabs-inline-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tab-add-wrapper {
@@ -931,7 +1030,7 @@ textarea {
   gap: 6px;
   width: fit-content;
   min-width: 40%;
-  max-width: min(860px, 88%);
+  max-width: min(860px, 80%);
 }
 
 .ai-workbuddy-message.user .ai-workbuddy-bubble-stack {

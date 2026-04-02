@@ -10,6 +10,7 @@ export interface ModelContextMessage {
 const SUMMARY_MAX_MESSAGES = 12;
 const SUMMARY_KEEP_RECENT_MESSAGES = 6;
 const SUMMARY_MAX_CHARS = 6000;
+const DEFAULT_RESPONSE_LANGUAGE_PROMPT = '请始终使用中文回复。';
 
 function joinBaseUrl(baseUrl: string) {
   const trimmed = baseUrl.trim();
@@ -233,6 +234,7 @@ export function buildModelContextMessages(session: ChatSession, messages: ChatMe
   const recentMessages = safeMessages.slice(summarizedCount);
 
   return [
+    { role: 'system' as const, content: DEFAULT_RESPONSE_LANGUAGE_PROMPT },
     ...(summary ? [{ role: 'system' as const, content: summary }] : []),
     ...recentMessages.map(message => ({
       role: message.role,

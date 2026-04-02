@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
-import { ArrowLeft, ArrowRight, ArrowUp, Bot, Brain, Copy, Globe, Home, Plus, RefreshCw, Sparkles, Square, Star, Volume2, VolumeX, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowUp, Bot, Brain, Copy, Globe, Home, Menu, Plus, RefreshCw, Sparkles, Square, Star, Volume2, VolumeX, X } from 'lucide-react';
 import ComposerSelect from './components/chat/ComposerSelect';
 import SettingsPanel from './components/settings/SettingsPanel';
 import {
@@ -180,6 +180,7 @@ function App() {
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [useSystemProxy, setUseSystemProxy] = useState(true);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
+  const [showHiddenTabsMenu, setShowHiddenTabsMenu] = useState(false);
   const [speechRate, setSpeechRate] = useState(0.9);
   const [shortcutCommands, setShortcutCommands] = useState<ShortcutCommand[]>([]);
   const [commandSettings, setCommandSettings] = useState<ShortcutCommandSettings>(COMMAND_SETTINGS_DEFAULTS);
@@ -199,7 +200,17 @@ function App() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const quickAddButtonRef = useRef<HTMLButtonElement | null>(null);
+  const hiddenTabsMenuRef = useRef<HTMLDivElement | null>(null);
   const chatPersistTimeoutRef = useRef<number | null>(null);
+  const wasChatSendingRef = useRef(false);
+  const latestChatHistoryRef = useRef<PersistedChatHistory | null>(null);
+  const latestSettingsSnapshotRef = useRef<{
+    useSystemProxy: boolean;
+    speechRate: number;
+    shortcutCommands: ShortcutCommand[];
+    shortcutCommandSettings: ShortcutCommandSettings;
+    aiProvider: AiProviderSettings;
+  } | null>(null);
   const [selectedPreset, setSelectedPreset] = useState<string>('');
   const [newName, setNewName] = useState('');
   const [newUrl, setNewUrl] = useState('');
@@ -270,6 +281,10 @@ function App() {
   );
   const isActiveTabFavorited = Boolean(activePinnedPlatform || matchingPinnedPlatform);
   const canFavoriteActiveTab = !isActiveAiChat && Boolean(activeBrowserPlatform && activeFavoriteUrl);
+  const hiddenPinnedPlatforms = useMemo(
+    () => platforms.filter(platform => platform.hidden),
+    [platforms]
+  );
   const availableAiModels = useMemo(
     () => (Array.isArray(aiProvider.models) ? aiProvider.models.filter(model => model.modelId.trim()) : []),
     [aiProvider.models]
@@ -394,16 +409,24 @@ function App() {
       setInitialized(true);
     });
 
-    invoke('load_settings').then((data: unknown) => {
+    Promise.all([
+      invoke('load_settings'),
+      invoke('load_chat_history_jsonl').catch(() => 'null'),
+    ]).then(([settingsData, chatHistoryData]) => {
       try {
-        const parsed = JSON.parse(data as string);
+        const parsed = JSON.parse(settingsData as string);
         const settings = { ...SETTINGS_DEFAULTS, ...parsed };
+        const jsonlChatHistory = typeof chatHistoryData === 'string'
+          ? JSON.parse(chatHistoryData)
+          : null;
         setUseSystemProxy(settings.useSystemProxy);
         setSpeechRate(settings.speechRate);
         const loadedCommands = Array.isArray(parsed?.shortcutCommands) ? parsed.shortcutCommands : [];
         const loadedCommandSettings = { ...COMMAND_SETTINGS_DEFAULTS, ...(parsed?.shortcutCommandSettings || {}) };
         const loadedAiProvider = normalizeAiProviderSettings(parsed?.aiProvider || {});
-        const loadedChatHistory = parsed?.chatHistory && typeof parsed.chatHistory === 'object'
+        const loadedChatHistory = jsonlChatHistory && typeof jsonlChatHistory === 'object'
+          ? jsonlChatHistory as PersistedChatHistory
+          : parsed?.chatHistory && typeof parsed.chatHistory === 'object'
           ? parsed.chatHistory as PersistedChatHistory
           : null;
         setShortcutCommands(loadedCommands);
@@ -435,6 +458,32 @@ function App() {
       window.removeEventListener('scroll', handleWindowChange, true);
     };
   }, [showQuickAdd]);
+
+  useEffect(() => {
+    if (!showHiddenTabsMenu) return;
+
+    const handlePointerDown = (event: globalThis.MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && hiddenTabsMenuRef.current?.contains(target)) {
+        return;
+      }
+      setShowHiddenTabsMenu(false);
+    };
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowHiddenTabsMenu(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showHiddenTabsMenu]);
 
   useEffect(() => {
     if (allVisibleTabs.length > 0 && (!activeTab || !allVisibleTabs.some(tab => tab.id === activeTab))) {
@@ -523,13 +572,26 @@ function App() {
     invoke('save_settings', { data: JSON.stringify(next) }).catch(console.error);
   };
 
+  useEffect(() => {
+    latestChatHistoryRef.current = persistedChatHistory;
+  }, [persistedChatHistory]);
+
+  useEffect(() => {
+    latestSettingsSnapshotRef.current = {
+      useSystemProxy,
+      speechRate,
+      shortcutCommands,
+      shortcutCommandSettings: commandSettings,
+      aiProvider,
+    };
+  }, [useSystemProxy, speechRate, shortcutCommands, commandSettings, aiProvider]);
+
   const persistSettings = (overrides: Partial<{
     useSystemProxy: boolean;
     speechRate: number;
     shortcutCommands: ShortcutCommand[];
     shortcutCommandSettings: ShortcutCommandSettings;
     aiProvider: AiProviderSettings;
-    chatHistory: PersistedChatHistory | null;
   }> = {}) => {
     saveSettings({
       useSystemProxy: overrides.useSystemProxy ?? useSystemProxy,
@@ -537,19 +599,58 @@ function App() {
       shortcutCommands: overrides.shortcutCommands ?? shortcutCommands,
       shortcutCommandSettings: overrides.shortcutCommandSettings ?? commandSettings,
       aiProvider: overrides.aiProvider ?? aiProvider,
-      chatHistory: overrides.chatHistory ?? persistedChatHistory,
     });
   };
 
+  const persistChatHistoryJsonl = (history: PersistedChatHistory | null) => {
+    if (!history) return;
+    invoke('save_chat_history_jsonl', { data: JSON.stringify(history) }).catch(console.error);
+  };
+
+  const flushPersistedSettings = (overrides: Partial<{
+    useSystemProxy: boolean;
+    speechRate: number;
+    shortcutCommands: ShortcutCommand[];
+    shortcutCommandSettings: ShortcutCommandSettings;
+    aiProvider: AiProviderSettings;
+  }> = {}) => {
+    if (chatPersistTimeoutRef.current) {
+      window.clearTimeout(chatPersistTimeoutRef.current);
+      chatPersistTimeoutRef.current = null;
+    }
+
+    const snapshot = latestSettingsSnapshotRef.current;
+    if (!snapshot) return;
+
+    saveSettings({
+      useSystemProxy: overrides.useSystemProxy ?? snapshot.useSystemProxy,
+      speechRate: overrides.speechRate ?? snapshot.speechRate,
+      shortcutCommands: overrides.shortcutCommands ?? snapshot.shortcutCommands,
+      shortcutCommandSettings: overrides.shortcutCommandSettings ?? snapshot.shortcutCommandSettings,
+      aiProvider: overrides.aiProvider ?? snapshot.aiProvider,
+    });
+  };
+
+  const flushPersistedChatHistory = (historyOverride?: PersistedChatHistory | null) => {
+    if (chatPersistTimeoutRef.current) {
+      window.clearTimeout(chatPersistTimeoutRef.current);
+      chatPersistTimeoutRef.current = null;
+    }
+
+    const history = historyOverride ?? latestChatHistoryRef.current;
+    if (!history) return;
+    persistChatHistoryJsonl(history);
+  };
+
   useEffect(() => {
-    if (!settingsLoaded || !chatHistoryLoaded || !persistedChatHistory) return;
+    if (!settingsLoaded || !chatHistoryLoaded) return;
 
     if (chatPersistTimeoutRef.current) {
       window.clearTimeout(chatPersistTimeoutRef.current);
     }
 
     chatPersistTimeoutRef.current = window.setTimeout(() => {
-      persistSettings({ chatHistory: persistedChatHistory });
+      flushPersistedChatHistory(persistedChatHistory);
       chatPersistTimeoutRef.current = null;
     }, 300);
 
@@ -560,6 +661,47 @@ function App() {
       }
     };
   }, [persistedChatHistory, settingsLoaded, chatHistoryLoaded]);
+
+  useEffect(() => {
+    if (!settingsLoaded || !chatHistoryLoaded) return;
+
+    const handleFlush = () => {
+      flushPersistedSettings();
+      flushPersistedChatHistory();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        handleFlush();
+      }
+    };
+
+    window.addEventListener('beforeunload', handleFlush);
+    window.addEventListener('pagehide', handleFlush);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleFlush);
+      window.removeEventListener('pagehide', handleFlush);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      handleFlush();
+    };
+  }, [settingsLoaded, chatHistoryLoaded]);
+
+  useEffect(() => {
+    if (!settingsLoaded || !chatHistoryLoaded) {
+      wasChatSendingRef.current = chatSending;
+      return;
+    }
+
+    const completedRound = wasChatSendingRef.current && !chatSending;
+    wasChatSendingRef.current = chatSending;
+
+    if (completedRound) {
+      flushPersistedSettings();
+      flushPersistedChatHistory();
+    }
+  }, [chatSending, settingsLoaded, chatHistoryLoaded]);
 
   const updateAiProvider = (partial: Partial<AiProviderSettings>) => {
     setAiProvider(prev => {
@@ -988,14 +1130,65 @@ function App() {
     invoke('navigate_webview_forward', { platformId: activeBrowserPlatform.id }).catch(console.error);
   };
 
+  const handleRestoreHiddenPlatform = (platformId: string) => {
+    setPlatforms(prev => prev.map(platform => (
+      platform.id === platformId
+        ? { ...platform, hidden: false }
+        : platform
+    )));
+    setActiveTab(platformId);
+    setShowHiddenTabsMenu(false);
+  };
+
   return (
     <div className="app-container">
       <div className={`top-shell ${isActiveAiChat ? 'without-browser-toolbar' : ''}`}>
         <div className="titlebar">
         <div className="tabs-container">
-          <button className="icon-button settings-logo-btn" onClick={toggleSettings} aria-label="设置">
-            <img src={appLogo} alt="Brainer Logo" className="app-logo-small" />
-          </button>
+          <div
+            ref={hiddenTabsMenuRef}
+            className={`titlebar-leading ${showHiddenTabsMenu ? 'has-hidden-panel' : ''}`}
+          >
+            <button className="icon-button settings-logo-btn" onClick={toggleSettings} aria-label="设置">
+              <img src={appLogo} alt="Brainer Logo" className="app-logo-small" />
+            </button>
+            <button
+              className={`icon-button hidden-tabs-trigger ${showHiddenTabsMenu ? 'is-active' : ''}`}
+              onClick={() => {
+                if (showSettings) return;
+                setShowQuickAdd(false);
+                setShowHiddenTabsMenu(prev => !prev);
+              }}
+              aria-label="显示已隐藏标签页"
+              title="显示已隐藏标签页"
+              disabled={showSettings}
+            >
+              <Menu size={17} />
+            </button>
+
+            {showHiddenTabsMenu && (
+              <div className="hidden-tabs-inline-panel">
+                <div className="hidden-tabs-inline-title">已隐藏标签</div>
+                {hiddenPinnedPlatforms.length === 0 ? (
+                  <div className="hidden-tabs-inline-empty">暂无隐藏项</div>
+                ) : (
+                  <div className="hidden-tabs-inline-list">
+                    {hiddenPinnedPlatforms.map(platform => (
+                      <button
+                        key={platform.id}
+                        className="hidden-tabs-inline-item"
+                        onClick={() => handleRestoreHiddenPlatform(platform.id)}
+                        title={platform.url}
+                      >
+                        <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={15} />
+                        <span>{platform.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           {aiProvider.enabled && (
             <div
@@ -1475,7 +1668,6 @@ function App() {
           }
         }}
       />
-
       <SettingsPanel
         showSettings={showSettings}
         onClose={toggleSettings}

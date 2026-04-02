@@ -31,3 +31,5 @@ src-tauri/target-tmp/
 src-tauri/gen/
 
 .claude/
+
+__pycache__/

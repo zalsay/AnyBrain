@@ -1,10 +1,11 @@
 import argparse
 import subprocess
+import tempfile
 from collections import deque
 from pathlib import Path
-from typing import Optional, Protocol, cast
+from typing import Protocol, cast
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 class PixelMap(Protocol):
@@ -15,7 +16,7 @@ class PixelMap(Protocol):
 class Args(argparse.Namespace):
     light: bool = False
     file: str = "logo.png"
-    output: Optional[str] = None
+    output: str | None = None
     black_threshold: int = 24
 
 
@@ -37,7 +38,7 @@ def replace_edge_connected_black_background(
     if raw_pixels is None:
         raise RuntimeError("Unable to access image pixels")
 
-    pixels = cast(PixelMap, raw_pixels)
+    pixels = cast(PixelMap, cast(object, raw_pixels))
 
     visited = [[False for _ in range(width)] for _ in range(height)]
     queue: deque[tuple[int, int]] = deque()
@@ -71,6 +72,37 @@ def replace_edge_connected_black_background(
     return working
 
 
+def create_apple_rounded_icon(img: Image.Image, corner_ratio: float = 0.2237) -> Image.Image:
+    """Apply Apple-style rounded corners to an RGBA icon."""
+    rounded = img.convert("RGBA").copy()
+    width, height = rounded.size
+    radius = max(1, int(min(width, height) * corner_ratio))
+
+    mask = Image.new("L", rounded.size, 0)
+    drawer = ImageDraw.Draw(mask)
+    drawer.rounded_rectangle((0, 0, width - 1, height - 1), radius=radius, fill=255)
+    rounded.putalpha(mask)
+    return rounded
+
+
+def save_tauri_icon_source(img: Image.Image, fallback_output_path: str) -> str:
+    """Save a temporary Apple-rounded icon source for Tauri icon generation."""
+    rounded = create_apple_rounded_icon(img)
+    output_dir = Path(fallback_output_path).resolve().parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile(
+        prefix="tauri-icon-apple-rounded-",
+        suffix=".png",
+        dir=output_dir,
+        delete=False,
+    ) as temp_file:
+        temp_path = temp_file.name
+
+    rounded.save(temp_path, "PNG")
+    return temp_path
+
+
 def process_logo(
     input_path: str,
     output_path: str,
@@ -97,10 +129,11 @@ def process_logo(
             print(f"Successfully saved processed logo to {output_path}")
 
             if generate_tauri_icons:
-                print(f"Generating Tauri icons from {output_path}...")
+                tauri_icon_input = save_tauri_icon_source(result, output_path)
+                print(f"Generating Tauri icons from {tauri_icon_input}...")
                 try:
                     _ = subprocess.run(
-                        ["npm", "run", "tauri", "icon", "--", output_path],
+                        ["npm", "run", "tauri", "icon", "--", tauri_icon_input],
                         check=True,
                     )
                     print("Successfully generated all Tauri icons.")
@@ -108,6 +141,8 @@ def process_logo(
                     print(f"Error generating Tauri icons: {e}")
                 except FileNotFoundError:
                     print("Error: 'npm' command not found. Please ensure Node.js is installed.")
+                finally:
+                    Path(tauri_icon_input).unlink(missing_ok=True)
 
     except Exception as e:
         print(f"Error processing image: {e}")
