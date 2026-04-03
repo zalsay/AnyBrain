@@ -202,6 +202,7 @@ function App() {
   const quickAddButtonRef = useRef<HTMLButtonElement | null>(null);
   const hiddenTabsMenuRef = useRef<HTMLDivElement | null>(null);
   const chatPersistTimeoutRef = useRef<number | null>(null);
+  const pendingToolbarAddressRef = useRef('');
   const wasChatSendingRef = useRef(false);
   const latestChatHistoryRef = useRef<PersistedChatHistory | null>(null);
   const latestSettingsSnapshotRef = useRef<{
@@ -220,6 +221,8 @@ function App() {
   const [thinkingDepth, setThinkingDepth] = useState<ThinkingDepth>('high');
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
   const [codeBlockCopyState, setCodeBlockCopyState] = useState<Record<string, 'success' | 'error'>>({});
+  const [toolbarAddressInput, setToolbarAddressInput] = useState('');
+  const [isEditingToolbarAddress, setIsEditingToolbarAddress] = useState(false);
   const {
     chatSessions,
     activeChatSessionId,
@@ -305,6 +308,12 @@ function App() {
     })),
     [availableAiModels]
   );
+
+  useEffect(() => {
+    if (!isEditingToolbarAddress) {
+      setToolbarAddressInput(isActiveAiChat ? '' : activeBrowserDisplayUrl);
+    }
+  }, [activeBrowserDisplayUrl, isActiveAiChat, isEditingToolbarAddress]);
 
   const handleCreateChatSession = () => {
     createSession();
@@ -1130,6 +1139,49 @@ function App() {
     invoke('navigate_webview_forward', { platformId: activeBrowserPlatform.id }).catch(console.error);
   };
 
+  const handleSubmitToolbarAddress = () => {
+    if (!activeBrowserPlatform || isActiveAiChat) return;
+
+    const nextUrl = normalizeUrl(toolbarAddressInput);
+    if (!nextUrl) {
+      setToolbarAddressInput(activeBrowserDisplayUrl);
+      setIsEditingToolbarAddress(false);
+      return;
+    }
+
+    if (activeTempPlatform) {
+      setTempTabs(prev => prev.map(platform => (
+        platform.id === activeTempPlatform.id
+          ? { ...platform, url: nextUrl }
+          : platform
+      )));
+    } else {
+      setPlatforms(prev => prev.map(platform => (
+        platform.id === activeBrowserPlatform.id
+          ? { ...platform, url: nextUrl }
+          : platform
+      )));
+    }
+
+    setBrowserNavStates(prev => {
+      const currentState = prev[activeBrowserPlatform.id];
+      return {
+        ...prev,
+        [activeBrowserPlatform.id]: {
+          platformId: activeBrowserPlatform.id,
+          currentUrl: nextUrl,
+          homeUrl: currentState?.homeUrl || activeBrowserPlatform.url || nextUrl,
+          isLoading: true,
+          canGoBack: currentState?.canGoBack ?? false,
+          canGoForward: false,
+        },
+      };
+    });
+    pendingToolbarAddressRef.current = nextUrl;
+    setToolbarAddressInput(nextUrl);
+    setIsEditingToolbarAddress(false);
+  };
+
   const handleRestoreHiddenPlatform = (platformId: string) => {
     setPlatforms(prev => prev.map(platform => (
       platform.id === platformId
@@ -1441,10 +1493,46 @@ function App() {
             <Globe size={16} className="browser-toolbar-address-icon" />
             <input
               className="browser-toolbar-address-input"
-              value={activeBrowserDisplayUrl}
-              readOnly
+              value={toolbarAddressInput}
+              placeholder={isActiveAiChat ? 'AnyBrain AI 对话' : '输入网址并回车'}
+              onChange={event => setToolbarAddressInput(event.target.value)}
+              onFocus={event => {
+                if (isActiveAiChat) return;
+                setIsEditingToolbarAddress(true);
+                event.currentTarget.select();
+              }}
+              onBlur={() => {
+                const nextValue = pendingToolbarAddressRef.current || activeBrowserDisplayUrl;
+                pendingToolbarAddressRef.current = '';
+                setToolbarAddressInput(nextValue);
+                setIsEditingToolbarAddress(false);
+              }}
+              onKeyDown={event => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  handleSubmitToolbarAddress();
+                  event.currentTarget.blur();
+                }
+                if (event.key === 'Escape') {
+                  setToolbarAddressInput(activeBrowserDisplayUrl);
+                  setIsEditingToolbarAddress(false);
+                  event.currentTarget.blur();
+                }
+              }}
               aria-label="当前地址"
+              readOnly={isActiveAiChat}
             />
+            <button
+              className="browser-toolbar-address-submit"
+              type="button"
+              aria-label="进入"
+              title="进入"
+              disabled={isActiveAiChat || !toolbarAddressInput.trim()}
+              onMouseDown={event => event.preventDefault()}
+              onClick={() => handleSubmitToolbarAddress()}
+            >
+              <ArrowRight size={15} />
+            </button>
             {activeBrowserNavState?.isLoading && !isActiveAiChat && (
               <span className="browser-toolbar-loading" aria-label="页面加载中">加载中</span>
             )}

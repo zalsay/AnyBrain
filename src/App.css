@@ -240,6 +240,32 @@ textarea {
   line-height: 1.2;
 }
 
+.browser-toolbar-address-submit {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(229, 238, 252, 0.74);
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+
+.browser-toolbar-address-submit:hover:not(:disabled) {
+  color: #f4fff9;
+  background: rgba(0, 227, 138, 0.14);
+  border-color: rgba(120, 255, 194, 0.24);
+}
+
+.browser-toolbar-address-submit:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
 .browser-toolbar-loading {
   flex: 0 0 auto;
   font-size: 12px;
