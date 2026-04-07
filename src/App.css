@@ -2194,6 +2194,15 @@ textarea {
   grid-template-columns: 1fr 1fr;
 }
 
+.panel-command-info {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 0;
+  text-align: left;
+}
+
 .panel-setting-item {
   justify-content: flex-start;
 }
@@ -2560,6 +2569,12 @@ textarea {
   font-size: 12px;
   line-height: 1.6;
   color: rgba(210, 218, 214, 0.76);
+}
+
+.panel-command-name,
+.panel-command-text {
+  width: 100%;
+  text-align: left;
 }
 
 .panel-ai-desc {
