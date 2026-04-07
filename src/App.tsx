@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
-import { ArrowLeft, ArrowRight, ArrowUp, Bot, Brain, Copy, Globe, Home, Menu, Plus, RefreshCw, Sparkles, Square, Star, Volume2, VolumeX, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowUp, Bot, Brain, Check, Copy, Globe, Home, Menu, Pencil, Plus, RefreshCw, Sparkles, Square, Star, Trash2, Volume2, VolumeX, X } from 'lucide-react';
 import ComposerSelect from './components/chat/ComposerSelect';
 import SettingsPanel from './components/settings/SettingsPanel';
 import {
@@ -100,6 +100,13 @@ function buildAttachmentContext(attachments: ChatAttachment[]) {
       return `${header}\n说明：该附件仅附带文件名和大小，当前未提取正文内容。`;
     })
   ].join('\n\n');
+}
+
+function hasStreamingMessages(history: PersistedChatHistory | null) {
+  if (!history) return false;
+  return history.sessions.some(session =>
+    session.messages.some(message => message.status === 'streaming')
+  );
 }
 
 type RenderContentBlock =
@@ -205,6 +212,7 @@ function App() {
   const pendingToolbarAddressRef = useRef('');
   const wasChatSendingRef = useRef(false);
   const latestChatHistoryRef = useRef<PersistedChatHistory | null>(null);
+  const lastSavedChatHistoryJsonRef = useRef('');
   const latestSettingsSnapshotRef = useRef<{
     useSystemProxy: boolean;
     speechRate: number;
@@ -223,6 +231,9 @@ function App() {
   const [codeBlockCopyState, setCodeBlockCopyState] = useState<Record<string, 'success' | 'error'>>({});
   const [toolbarAddressInput, setToolbarAddressInput] = useState('');
   const [isEditingToolbarAddress, setIsEditingToolbarAddress] = useState(false);
+  const [editingChatSessionId, setEditingChatSessionId] = useState('');
+  const [editingChatSessionTitle, setEditingChatSessionTitle] = useState('');
+  const [pendingDeleteChatSession, setPendingDeleteChatSession] = useState<{ id: string; title: string } | null>(null);
   const {
     chatSessions,
     activeChatSessionId,
@@ -237,6 +248,8 @@ function App() {
     setChatError,
     createSession,
     resetActiveSession,
+    renameSession,
+    deleteSession,
     copyMessage,
     speakMessage,
     sendChat,
@@ -246,7 +259,7 @@ function App() {
     speechRate,
     persistedHistory: persistedChatHistory,
     historyLoaded: chatHistoryLoaded,
-    onHistoryChange: setPersistedChatHistory,
+    onHistoryChange: handleChatHistoryChange,
   });
 
   const allVisibleTabs = useMemo(() => {
@@ -308,6 +321,8 @@ function App() {
     })),
     [availableAiModels]
   );
+  const isRestoringChatHistory = !chatHistoryLoaded;
+  const hasActiveChatSession = Boolean(activeChatSessionId);
 
   useEffect(() => {
     if (!isEditingToolbarAddress) {
@@ -315,11 +330,75 @@ function App() {
     }
   }, [activeBrowserDisplayUrl, isActiveAiChat, isEditingToolbarAddress]);
 
+  useEffect(() => {
+    if (editingChatSessionId && !chatSessions.some(session => session.id === editingChatSessionId)) {
+      setEditingChatSessionId('');
+      setEditingChatSessionTitle('');
+    }
+  }, [chatSessions, editingChatSessionId]);
+
   const handleCreateChatSession = () => {
+    setEditingChatSessionId('');
+    setEditingChatSessionTitle('');
     createSession();
   };
 
+  const handleStartEditingChatSession = (sessionId: string, title: string) => {
+    setEditingChatSessionId(sessionId);
+    setEditingChatSessionTitle(title);
+  };
+
+  const handleCancelEditingChatSession = () => {
+    setEditingChatSessionId('');
+    setEditingChatSessionTitle('');
+  };
+
+  const handleSaveChatSessionTitle = (sessionId: string) => {
+    renameSession(sessionId, editingChatSessionTitle);
+    handleCancelEditingChatSession();
+  };
+
+  const performDeleteChatSession = async (sessionId: string) => {
+    deleteSession(sessionId);
+    if (editingChatSessionId === sessionId) {
+      handleCancelEditingChatSession();
+    }
+
+    try {
+      await invoke('delete_chat_session', { sessionId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setChatError(message || '删除会话失败。');
+
+      invoke('load_chat_history_jsonl')
+        .then(data => {
+          const parsed = typeof data === 'string' ? JSON.parse(data) : null;
+          setPersistedChatHistory(parsed && typeof parsed === 'object' ? parsed as PersistedChatHistory : null);
+        })
+        .catch(() => {
+          setPersistedChatHistory(null);
+        });
+    }
+  };
+
+  const handleDeleteChatSession = (sessionId: string, title: string) => {
+    if (chatSending) return;
+    setPendingDeleteChatSession({ id: sessionId, title });
+  };
+
+  const handleCancelDeleteChatSession = () => {
+    setPendingDeleteChatSession(null);
+  };
+
+  const handleConfirmDeleteChatSession = async () => {
+    if (!pendingDeleteChatSession) return;
+    const { id } = pendingDeleteChatSession;
+    setPendingDeleteChatSession(null);
+    await performDeleteChatSession(id);
+  };
+
   const handleUploadChatFile = () => {
+    if (isRestoringChatHistory) return;
     fileInputRef.current?.click();
   };
 
@@ -337,6 +416,8 @@ function App() {
   };
 
   const handleSendComposer = async () => {
+    if (isRestoringChatHistory) return;
+
     const sent = await sendChat({
       reasoningEffort: thinkingDepth,
       attachmentContext: buildAttachmentContext(chatAttachments),
@@ -613,8 +694,25 @@ function App() {
 
   const persistChatHistoryJsonl = (history: PersistedChatHistory | null) => {
     if (!history) return;
-    invoke('save_chat_history_jsonl', { data: JSON.stringify(history) }).catch(console.error);
+    const serialized = JSON.stringify(history);
+    if (lastSavedChatHistoryJsonRef.current === serialized) {
+      return;
+    }
+    lastSavedChatHistoryJsonRef.current = serialized;
+    invoke('save_chat_history_jsonl', { data: serialized }).catch(error => {
+      lastSavedChatHistoryJsonRef.current = '';
+      console.error(error);
+    });
   };
+
+  function handleChatHistoryChange(history: PersistedChatHistory) {
+    latestChatHistoryRef.current = history;
+    setPersistedChatHistory(history);
+
+    if (!hasStreamingMessages(history)) {
+      persistChatHistoryJsonl(history);
+    }
+  }
 
   const flushPersistedSettings = (overrides: Partial<{
     useSystemProxy: boolean;
@@ -1543,88 +1641,193 @@ function App() {
 
       {isActiveAiChat && !showSettings && (
         <main className="ai-workbuddy-shell">
-          <aside className="ai-workbuddy-sidebar">
-            <button className="ai-workbuddy-new-session" onClick={handleCreateChatSession} type="button">
+          <aside className={`ai-workbuddy-sidebar ${editingChatSessionId ? 'has-session-editing' : ''}`}>
+            <button
+              className="ai-workbuddy-new-session"
+              onClick={handleCreateChatSession}
+              type="button"
+              disabled={isRestoringChatHistory}
+            >
               <Plus size={15} />
               <span>开启新会话</span>
             </button>
 
             <div className="ai-workbuddy-session-list">
-              {chatSessions.map(session => (
-                <button
-                  key={session.id}
-                  className={`ai-workbuddy-session-item ${session.id === activeChatSessionId ? 'is-active' : ''}`}
-                  onClick={() => {
-                    setActiveChatSessionId(session.id);
-                    setChatError('');
-                  }}
-                  type="button"
-                >
-                  <span className="ai-workbuddy-session-title">{session.title}</span>
-                  <span className="ai-workbuddy-session-meta">{Math.max(session.messages.length - 1, 0)} 条消息</span>
-                </button>
-              ))}
+              {isRestoringChatHistory ? (
+                <div className="ai-workbuddy-session-placeholder">
+                  <span className="ai-workbuddy-session-placeholder-title">正在恢复会话</span>
+                  <span className="ai-workbuddy-session-placeholder-meta">等待本地历史加载…</span>
+                </div>
+              ) : chatSessions.length > 0 ? (
+                chatSessions.map(session => {
+                  const isEditing = editingChatSessionId === session.id;
+
+                  return (
+                    <div
+                      key={session.id}
+                      className={`ai-workbuddy-session-item ${session.id === activeChatSessionId ? 'is-active' : ''} ${isEditing ? 'is-editing' : ''}`}
+                    >
+                      {isEditing ? (
+                        <div className="ai-workbuddy-session-editor">
+                          <input
+                            className="ai-workbuddy-session-input"
+                            value={editingChatSessionTitle}
+                            autoFocus
+                            onChange={event => setEditingChatSessionTitle(event.target.value)}
+                            onClick={event => event.stopPropagation()}
+                            onKeyDown={event => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault();
+                                handleSaveChatSessionTitle(session.id);
+                              }
+                              if (event.key === 'Escape') {
+                                event.preventDefault();
+                                handleCancelEditingChatSession();
+                              }
+                            }}
+                          />
+                          <div className="ai-workbuddy-session-actions is-visible">
+                            <button
+                              className="ai-workbuddy-session-action-btn"
+                              type="button"
+                              onClick={() => handleSaveChatSessionTitle(session.id)}
+                              title="保存会话标题"
+                              aria-label="保存会话标题"
+                            >
+                              <Check size={12} />
+                            </button>
+                            <button
+                              className="ai-workbuddy-session-action-btn"
+                              type="button"
+                              onClick={handleCancelEditingChatSession}
+                              title="取消编辑"
+                              aria-label="取消编辑"
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <button
+                            className="ai-workbuddy-session-main"
+                            onClick={() => {
+                              setActiveChatSessionId(session.id);
+                              setChatError('');
+                            }}
+                            type="button"
+                          >
+                            <span className="ai-workbuddy-session-title">{session.title}</span>
+                            <span className="ai-workbuddy-session-meta">{Math.max(session.messages.length - 1, 0)} 条消息</span>
+                          </button>
+                          <div className="ai-workbuddy-session-actions">
+                            <button
+                              className="ai-workbuddy-session-action-btn"
+                              type="button"
+                              onClick={() => handleStartEditingChatSession(session.id, session.title)}
+                              title="编辑会话标题"
+                              aria-label="编辑会话标题"
+                              disabled={chatSending}
+                            >
+                              <Pencil size={12} />
+                            </button>
+                            <button
+                              className="ai-workbuddy-session-action-btn is-danger"
+                              type="button"
+                              onClick={() => handleDeleteChatSession(session.id, session.title)}
+                              title="删除会话"
+                              aria-label="删除会话"
+                              disabled={chatSending}
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="ai-workbuddy-session-placeholder">
+                  <span className="ai-workbuddy-session-placeholder-title">暂无会话</span>
+                  <span className="ai-workbuddy-session-placeholder-meta">点击上方按钮，或直接输入后发送。</span>
+                </div>
+              )}
             </div>
           </aside>
 
           <section className="ai-workbuddy-main">
             <div className="ai-workbuddy-scroll">
               <div className="ai-workbuddy-stream">
-                {activeChatMessages.map(message => (
-                  <article key={message.id} className={`ai-workbuddy-message ${message.role} ${message.status === 'error' ? 'is-error' : ''}`}>
-                    <div className="ai-workbuddy-message-meta">
-                      <div className={`ai-workbuddy-avatar ${message.role === 'assistant' && message.status === 'streaming' ? 'is-streaming' : ''}`}>
-                        {message.role === 'assistant' ? <Bot size={16} /> : <span>你</span>}
-                      </div>
-                      <div className="ai-workbuddy-meta-text">
-                        <span className="ai-workbuddy-role">{message.role === 'assistant' ? 'AnyBrain' : '你'}</span>
-                        <span className="ai-workbuddy-time">{message.status === 'streaming' ? '思考中' : message.status === 'error' ? '请求失败' : '刚刚'}</span>
-                      </div>
-                    </div>
-
-                    <div className="ai-workbuddy-bubble-stack">
-                      <div className="ai-workbuddy-bubble-shell">
-                        <div className="ai-workbuddy-bubble-glow" />
-                        <div className="ai-workbuddy-bubble">
-                          <div className="ai-workbuddy-content">{renderMessageContent(message.id, message.content)}</div>
+                {isRestoringChatHistory ? (
+                  <div className="ai-workbuddy-empty-state">
+                    <div className="ai-workbuddy-empty-icon"><Bot size={18} /></div>
+                    <div className="ai-workbuddy-empty-title">正在恢复最近会话</div>
+                    <div className="ai-workbuddy-empty-meta">等待本地 JSONL 历史加载完成…</div>
+                  </div>
+                ) : hasActiveChatSession ? (
+                  activeChatMessages.map(message => (
+                    <article key={message.id} className={`ai-workbuddy-message ${message.role} ${message.status === 'error' ? 'is-error' : ''}`}>
+                      <div className="ai-workbuddy-message-meta">
+                        <div className={`ai-workbuddy-avatar ${message.role === 'assistant' && message.status === 'streaming' ? 'is-streaming' : ''}`}>
+                          {message.role === 'assistant' ? <Bot size={16} /> : <span>你</span>}
+                        </div>
+                        <div className="ai-workbuddy-meta-text">
+                          <span className="ai-workbuddy-role">{message.role === 'assistant' ? 'AnyBrain' : '你'}</span>
+                          <span className="ai-workbuddy-time">{message.status === 'streaming' ? '思考中' : message.status === 'error' ? '请求失败' : '刚刚'}</span>
                         </div>
                       </div>
 
-                      <div className="ai-workbuddy-actions">
-                        {message.role === 'user' && message.id === lastUserMessageId && (
+                      <div className="ai-workbuddy-bubble-stack">
+                        <div className="ai-workbuddy-bubble-shell">
+                          <div className="ai-workbuddy-bubble-glow" />
+                          <div className="ai-workbuddy-bubble">
+                            <div className="ai-workbuddy-content">{renderMessageContent(message.id, message.content)}</div>
+                          </div>
+                        </div>
+
+                        <div className="ai-workbuddy-actions">
+                          {message.role === 'user' && message.id === lastUserMessageId && (
+                            <button
+                              className="ai-workbuddy-action-btn"
+                              onClick={() => void handleRetryMessage(message.id)}
+                              title="重试调用模型"
+                              aria-label="重试调用模型"
+                              disabled={chatSending}
+                            >
+                              <RefreshCw size={12} />
+                              <span>重试</span>
+                            </button>
+                          )}
                           <button
-                            className="ai-workbuddy-action-btn"
-                            onClick={() => void handleRetryMessage(message.id)}
-                            title="重试调用模型"
-                            aria-label="重试调用模型"
-                            disabled={chatSending}
+                            className={`ai-workbuddy-action-btn ${chatCopyState[message.id] ? `is-${chatCopyState[message.id]}` : ''}`}
+                            onClick={() => void copyMessage(message.id, message.content)}
+                            title={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
+                            aria-label={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
                           >
-                            <RefreshCw size={12} />
-                            <span>重试</span>
+                            <Copy size={12} />
+                            <span>{chatCopyState[message.id] === 'success' ? '已复制' : '复制'}</span>
                           </button>
-                        )}
-                        <button
-                          className={`ai-workbuddy-action-btn ${chatCopyState[message.id] ? `is-${chatCopyState[message.id]}` : ''}`}
-                          onClick={() => void copyMessage(message.id, message.content)}
-                          title={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
-                          aria-label={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
-                        >
-                          <Copy size={12} />
-                          <span>{chatCopyState[message.id] === 'success' ? '已复制' : '复制'}</span>
-                        </button>
-                        <button
-                          className={`ai-workbuddy-action-btn ${chatSpeakingId === message.id ? 'is-speaking' : ''}`}
-                          onClick={() => speakMessage(message.id, message.content)}
-                          title={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
-                          aria-label={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
-                        >
-                          {chatSpeakingId === message.id ? <VolumeX size={12} /> : <Volume2 size={12} />}
-                          <span>{chatSpeakingId === message.id ? '停止' : '朗读'}</span>
-                        </button>
+                          <button
+                            className={`ai-workbuddy-action-btn ${chatSpeakingId === message.id ? 'is-speaking' : ''}`}
+                            onClick={() => speakMessage(message.id, message.content)}
+                            title={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
+                            aria-label={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
+                          >
+                            {chatSpeakingId === message.id ? <VolumeX size={12} /> : <Volume2 size={12} />}
+                            <span>{chatSpeakingId === message.id ? '停止' : '朗读'}</span>
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  </article>
-                ))}
+                    </article>
+                  ))
+                ) : (
+                  <div className="ai-workbuddy-empty-state">
+                    <div className="ai-workbuddy-empty-icon"><Sparkles size={18} /></div>
+                    <div className="ai-workbuddy-empty-title">还没有进行中的会话</div>
+                    <div className="ai-workbuddy-empty-meta">点击左侧“开启新会话”，或直接在下方输入并发送。</div>
+                  </div>
+                )}
                 <div ref={messagesEndRef} />
               </div>
             </div>
@@ -1661,8 +1864,9 @@ function App() {
                 <div className="ai-workbuddy-input-row">
                   <textarea
                     className="ai-workbuddy-textarea"
-                    placeholder="Ask for follow-up changes"
+                    placeholder={isRestoringChatHistory ? '正在恢复会话…' : 'Ask for follow-up changes'}
                     value={chatInput}
+                    disabled={isRestoringChatHistory}
                     onChange={e => setChatInput(e.target.value)}
                     onKeyDown={e => {
                       if (e.key === 'Enter' && !e.shiftKey) {
@@ -1681,6 +1885,7 @@ function App() {
                       onClick={handleUploadChatFile}
                       title="添加附件"
                       aria-label="添加附件"
+                      disabled={isRestoringChatHistory}
                     >
                       <Plus size={16} />
                     </button>
@@ -1702,7 +1907,7 @@ function App() {
                         placeholder="No model"
                         options={aiModelOptions}
                         onChange={value => updateAiProvider({ modelId: value })}
-                        disabled={aiModelOptions.length === 0}
+                        disabled={isRestoringChatHistory || aiModelOptions.length === 0}
                         className="ai-workbuddy-composer-select"
                       />
                     </div>
@@ -1715,6 +1920,7 @@ function App() {
                         placeholder="High"
                         options={THINKING_DEPTH_OPTIONS}
                         onChange={value => setThinkingDepth(value as ThinkingDepth)}
+                        disabled={isRestoringChatHistory}
                         className="ai-workbuddy-composer-select"
                       />
                     </div>
@@ -1726,7 +1932,7 @@ function App() {
                     className={`ai-workbuddy-send-btn ${chatSending ? 'is-sending' : ''}`}
                     type="button"
                     onClick={() => void handleSendComposer()}
-                    disabled={chatSending || (!chatInput.trim() && chatAttachments.length === 0)}
+                    disabled={isRestoringChatHistory || chatSending || (!chatInput.trim() && chatAttachments.length === 0)}
                     aria-label={chatSending ? '发送中' : '发送消息'}
                     title={chatSending ? '发送中' : '发送消息'}
                   >
@@ -1737,6 +1943,40 @@ function App() {
             </footer>
           </section>
         </main>
+      )}
+
+      {pendingDeleteChatSession && (
+        <div className="ai-workbuddy-dialog-backdrop" onClick={handleCancelDeleteChatSession}>
+          <div
+            className="ai-workbuddy-dialog"
+            onClick={event => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="删除会话确认"
+          >
+            <div className="ai-workbuddy-dialog-title">删除这个会话？</div>
+            <div className="ai-workbuddy-dialog-body">
+              <span className="ai-workbuddy-dialog-session-name">{pendingDeleteChatSession.title || '未命名会话'}</span>
+              <span>删除后将无法恢复。</span>
+            </div>
+            <div className="ai-workbuddy-dialog-actions">
+              <button
+                className="ai-workbuddy-dialog-btn"
+                type="button"
+                onClick={handleCancelDeleteChatSession}
+              >
+                取消
+              </button>
+              <button
+                className="ai-workbuddy-dialog-btn is-danger"
+                type="button"
+                onClick={() => void handleConfirmDeleteChatSession()}
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
 

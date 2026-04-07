@@ -40,10 +40,19 @@ interface RunModelRequestOptions {
   reasoningEffort?: ThinkingDepth;
 }
 
+const MODEL_REQUEST_MAX_RETRIES = 3;
+const MODEL_REQUEST_RETRY_BASE_DELAY_MS = 500;
+
 function joinBaseUrl(baseUrl: string) {
   const trimmed = baseUrl.trim();
   if (!trimmed) return '';
   return trimmed.replace(/\/$/, '');
+}
+
+function sleep(ms: number) {
+  return new Promise(resolve => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function sanitizeChatMessage(message: ChatMessage): ChatMessage | null {
@@ -93,7 +102,12 @@ function normalizePersistedHistory(persistedHistory?: PersistedChatHistory | nul
   if (!persistedHistory || !Array.isArray(persistedHistory.sessions)) return null;
 
   const sessions = persistedHistory.sessions.map(sanitizeChatSession);
-  if (sessions.length === 0) return null;
+  if (sessions.length === 0) {
+    return {
+      sessions: [],
+      activeSessionId: '',
+    };
+  }
 
   const activeSessionId = sessions.some(session => session.id === persistedHistory.activeSessionId)
     ? persistedHistory.activeSessionId
@@ -109,6 +123,13 @@ function createPersistedHistorySnapshot(
   chatSessions: ChatSession[],
   activeChatSessionId: string
 ): PersistedChatHistory | null {
+  if (chatSessions.length === 0) {
+    return {
+      sessions: [],
+      activeSessionId: '',
+    };
+  }
+
   return normalizePersistedHistory({
     sessions: chatSessions,
     activeSessionId: activeChatSessionId,
@@ -136,7 +157,7 @@ export function useAiChat({
     [chatSessions, activeChatSessionId]
   );
 
-  const activeChatMessages = activeChatSession?.messages ?? [CHAT_WELCOME_MESSAGE];
+  const activeChatMessages = activeChatSession?.messages ?? [];
 
   const updateChatSession = (sessionId: string, updater: (session: ChatSession) => ChatSession) => {
     setChatSessions(prev => prev.map(session => (
@@ -169,6 +190,31 @@ export function useAiChat({
       summaryModelId: '',
       updatedAt: Date.now(),
     }));
+    setChatError('');
+  };
+
+  const renameSession = (sessionId: string, title: string) => {
+    const nextTitle = title.trim() || '新会话';
+    setChatSessions(prev => prev.map(session => (
+      session.id === sessionId
+        ? { ...session, title: nextTitle, updatedAt: Date.now() }
+        : session
+    )));
+  };
+
+  const deleteSession = (sessionId: string) => {
+    setChatSessions(prev => {
+      const nextSessions = prev.filter(session => session.id !== sessionId);
+      setActiveChatSessionId(currentActiveSessionId => {
+        if (currentActiveSessionId !== sessionId) {
+          return nextSessions.some(session => session.id === currentActiveSessionId)
+            ? currentActiveSessionId
+            : (nextSessions[0]?.id ?? '');
+        }
+        return nextSessions[0]?.id ?? '';
+      });
+      return nextSessions;
+    });
     setChatError('');
   };
 
@@ -227,6 +273,18 @@ export function useAiChat({
       messages: session.messages.map(message => (
         message.id === assistantId
           ? { ...message, content: reply, status: 'streaming' }
+          : message
+      )),
+      updatedAt: Date.now(),
+    }));
+  };
+
+  const resetAssistantPlaceholder = (sessionId: string, assistantId: string, content = '正在思考中…') => {
+    updateChatSession(sessionId, session => ({
+      ...session,
+      messages: session.messages.map(message => (
+        message.id === assistantId
+          ? { ...message, content, status: 'streaming' }
           : message
       )),
       updatedAt: Date.now(),
@@ -567,41 +625,61 @@ export function useAiChat({
       let handled = false;
       let lastError = '';
 
-      for (const plan of requestPlans) {
-        if (!plan.url) continue;
-
-        try {
-          const response = await fetch(plan.url, {
-            method: 'POST',
-            headers: baseHeaders,
-            body: JSON.stringify(plan.body)
-          });
-
-          const { contentType, rawText, payload, currentReply } = await consumeResponseStream(
-            response,
+      for (let retryIndex = 0; retryIndex <= MODEL_REQUEST_MAX_RETRIES && !handled; retryIndex += 1) {
+        if (retryIndex > 0) {
+          const retryDelay = MODEL_REQUEST_RETRY_BASE_DELAY_MS * (2 ** (retryIndex - 1));
+          console.warn('[AnyBrain][AI] retrying request', {
+            retryAttempt: retryIndex,
+            delayMs: retryDelay,
             sessionId,
-            assistantId
-          );
-          console.log('[AnyBrain][AI] response meta', {
-            mode: plan.label,
-            url: plan.url,
-            status: response.status,
-            ok: response.ok,
-            contentType,
           });
-          console.log('[AnyBrain][AI] raw response preview', rawText.slice(0, 2000));
+          resetAssistantPlaceholder(sessionId, assistantId, `请求失败，正在重试第 ${retryIndex} 次…`);
+          await sleep(retryDelay);
+          resetAssistantPlaceholder(sessionId, assistantId);
+        }
 
-          if (!response.ok) {
-            const detail = extractErrorMessage(payload, rawText || `请求失败（${response.status}）`);
-            throw new Error(`HTTP ${response.status}: ${detail}`);
+        for (const plan of requestPlans) {
+          if (!plan.url) continue;
+
+          try {
+            const response = await fetch(plan.url, {
+              method: 'POST',
+              headers: baseHeaders,
+              body: JSON.stringify(plan.body)
+            });
+
+            const { contentType, rawText, payload, currentReply } = await consumeResponseStream(
+              response,
+              sessionId,
+              assistantId
+            );
+            console.log('[AnyBrain][AI] response meta', {
+              mode: plan.label,
+              url: plan.url,
+              status: response.status,
+              ok: response.ok,
+              contentType,
+              retryAttempt: retryIndex,
+            });
+            console.log('[AnyBrain][AI] raw response preview', rawText.slice(0, 2000));
+
+            if (!response.ok) {
+              const detail = extractErrorMessage(payload, rawText || `请求失败（${response.status}）`);
+              throw new Error(`HTTP ${response.status}: ${detail}`);
+            }
+
+            reply = currentReply || '接口已返回，但未获取到有效内容。';
+            handled = true;
+            break;
+          } catch (requestError) {
+            lastError = requestError instanceof Error ? requestError.message : String(requestError);
+            console.warn('[AnyBrain][AI] request failed', {
+              mode: plan.label,
+              url: plan.url,
+              error: lastError,
+              retryAttempt: retryIndex,
+            });
           }
-
-          reply = currentReply || '接口已返回，但未获取到有效内容。';
-          handled = true;
-          break;
-        } catch (requestError) {
-          lastError = requestError instanceof Error ? requestError.message : String(requestError);
-          console.warn('[AnyBrain][AI] request failed', { mode: plan.label, url: plan.url, error: lastError });
         }
       }
 
@@ -786,9 +864,8 @@ export function useAiChat({
       setChatSessions(normalizedHistory.sessions);
       setActiveChatSessionId(normalizedHistory.activeSessionId);
     } else {
-      const nextSession = createChatSession();
-      setChatSessions([nextSession]);
-      setActiveChatSessionId(nextSession.id);
+      setChatSessions([]);
+      setActiveChatSessionId('');
     }
 
     hasHydratedPersistedHistoryRef.current = true;
@@ -797,22 +874,13 @@ export function useAiChat({
   useEffect(() => {
     if (!historyLoaded || !hasHydratedPersistedHistoryRef.current) return;
 
-    if (chatSessions.length === 0) {
-      const nextSession = createChatSession();
-      setChatSessions([nextSession]);
-      setActiveChatSessionId(nextSession.id);
-      return;
-    }
-
-    if (!activeChatSessionId || !chatSessions.some(session => session.id === activeChatSessionId)) {
+    if (chatSessions.length > 0 && (!activeChatSessionId || !chatSessions.some(session => session.id === activeChatSessionId))) {
       setActiveChatSessionId(chatSessions[0].id);
     }
   }, [chatSessions, activeChatSessionId, historyLoaded]);
 
   useEffect(() => {
     if (!historyLoaded || !hasHydratedPersistedHistoryRef.current || !onHistoryChange) return;
-    if (chatSessions.length === 0 || !activeChatSessionId) return;
-
     const nextHistory = createPersistedHistorySnapshot(chatSessions, activeChatSessionId);
     if (!nextHistory) return;
 
@@ -841,6 +909,8 @@ export function useAiChat({
     setChatError,
     createSession,
     resetActiveSession,
+    renameSession,
+    deleteSession,
     copyMessage,
     speakMessage,
     sendChat,
