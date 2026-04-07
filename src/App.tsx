@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
-import { ArrowLeft, ArrowRight, ArrowUp, Bot, Brain, Check, Copy, Globe, Home, Menu, Pencil, Plus, RefreshCw, Sparkles, Square, Star, Trash2, Volume2, VolumeX, X } from 'lucide-react';
+import { openUrl } from '@tauri-apps/plugin-opener';
+import { ArrowLeft, ArrowRight, ArrowUp, Bot, Brain, Check, Copy, ExternalLink, Globe, Home, Menu, Pencil, Plus, RefreshCw, Sparkles, Square, Star, Trash2, Volume2, VolumeX, X } from 'lucide-react';
 import ComposerSelect from './components/chat/ComposerSelect';
 import SettingsPanel from './components/settings/SettingsPanel';
 import {
@@ -307,6 +308,7 @@ function App() {
   const activeBrowserUrl = activeBrowserPlatform?.url?.trim() || '';
   const activeBrowserNavState = activeTab ? browserNavStates[activeTab] : undefined;
   const activeBrowserDisplayUrl = activeBrowserNavState?.currentUrl || activeBrowserUrl || (isActiveAiChat ? 'AnyBrain AI 对话' : '输入网址或在标签页中打开页面');
+  const currentOpenableBrowserUrl = activeBrowserNavState?.currentUrl || activeBrowserUrl;
   const activeFavoriteUrl = useMemo(
     () => normalizeUrl(activeBrowserNavState?.currentUrl || activeBrowserUrl),
     [activeBrowserNavState?.currentUrl, activeBrowserUrl]
@@ -1332,6 +1334,17 @@ function App() {
     invoke('navigate_webview_forward', { platformId: activeBrowserPlatform.id }).catch(console.error);
   };
 
+  const handleOpenCurrentAddressInBrowser = async () => {
+    const targetUrl = currentOpenableBrowserUrl;
+    if (!targetUrl.trim()) return;
+
+    try {
+      await openUrl(normalizeUrl(targetUrl));
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
   const handleSubmitToolbarAddress = () => {
     if (!activeBrowserPlatform || isActiveAiChat) return;
 
@@ -1730,6 +1743,16 @@ function App() {
               <span className="browser-toolbar-loading" aria-label="页面加载中">加载中</span>
             )}
           </div>
+          <button
+            className="browser-toolbar-btn browser-toolbar-btn-secondary"
+            type="button"
+            aria-label="用浏览器打开当前地址"
+            title="用浏览器打开当前地址"
+            onClick={() => void handleOpenCurrentAddressInBrowser()}
+            disabled={!currentOpenableBrowserUrl}
+          >
+            <ExternalLink size={15} />
+          </button>
         </div>
       )}
       </div>

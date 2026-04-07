@@ -199,6 +199,10 @@ textarea {
   fill: currentColor;
 }
 
+.browser-toolbar-btn.browser-toolbar-btn-secondary {
+  flex: 0 0 auto;
+}
+
 .browser-toolbar-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
