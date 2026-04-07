@@ -34,6 +34,8 @@ import type {
 import './App.css';
 import appLogo from '../src-tauri/icons/128x128.png';
 
+const LAST_ACTIVE_TAB_STORAGE_KEY = 'anybrain-last-active-tab';
+
 interface ChatAttachment {
   id: string;
   name: string;
@@ -177,6 +179,26 @@ function renderInlineCode(content: string): ReactNode[] {
   return nodes.length > 0 ? nodes : [content];
 }
 
+function loadLastActiveTab() {
+  try {
+    return localStorage.getItem(LAST_ACTIVE_TAB_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function saveLastActiveTab(tabId: string) {
+  try {
+    if (tabId) {
+      localStorage.setItem(LAST_ACTIVE_TAB_STORAGE_KEY, tabId);
+    } else {
+      localStorage.removeItem(LAST_ACTIVE_TAB_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore localStorage failures.
+  }
+}
+
 function App() {
   const [platforms, setPlatforms] = useState<Platform[]>([]);
   const [tempTabs, setTempTabs] = useState<Platform[]>([]);
@@ -213,6 +235,8 @@ function App() {
   const wasChatSendingRef = useRef(false);
   const latestChatHistoryRef = useRef<PersistedChatHistory | null>(null);
   const lastSavedChatHistoryJsonRef = useRef('');
+  const initialPreferredTabRef = useRef(loadLastActiveTab());
+  const hasRestoredInitialActiveTabRef = useRef(false);
   const latestSettingsSnapshotRef = useRef<{
     useSystemProxy: boolean;
     speechRate: number;
@@ -247,7 +271,6 @@ function App() {
     setChatInput,
     setChatError,
     createSession,
-    resetActiveSession,
     renameSession,
     deleteSession,
     copyMessage,
@@ -491,9 +514,7 @@ function App() {
   useEffect(() => {
     loadPlatformsAsync().then(loaded => {
       setPlatforms(loaded);
-      if (loaded.length > 0) {
-        setActiveTab(loaded[0].id);
-      } else {
+      if (loaded.length === 0) {
         setShowSettings(true);
       }
       setInitialized(true);
@@ -536,6 +557,11 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!activeTab) return;
+    saveLastActiveTab(activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
     if (!showQuickAdd) return;
 
     updateQuickAddPosition();
@@ -576,10 +602,25 @@ function App() {
   }, [showHiddenTabsMenu]);
 
   useEffect(() => {
+    if (!initialized || !settingsLoaded) return;
+
+    if (!hasRestoredInitialActiveTabRef.current) {
+      hasRestoredInitialActiveTabRef.current = true;
+      const preferredTabId = initialPreferredTabRef.current;
+      const restoredTabId = preferredTabId && allVisibleTabs.some(tab => tab.id === preferredTabId)
+        ? preferredTabId
+        : (allVisibleTabs[0]?.id || '');
+
+      if (restoredTabId) {
+        setActiveTab(restoredTabId);
+      }
+      return;
+    }
+
     if (allVisibleTabs.length > 0 && (!activeTab || !allVisibleTabs.some(tab => tab.id === activeTab))) {
       setActiveTab(allVisibleTabs[0].id);
     }
-  }, [allVisibleTabs, activeTab]);
+  }, [initialized, settingsLoaded, allVisibleTabs, activeTab]);
 
   useEffect(() => {
     if (initialized) {
@@ -1090,6 +1131,64 @@ function App() {
     setActiveTab(id);
   };
 
+  const handleReloadAiPage = async () => {
+    const settingsSnapshot = latestSettingsSnapshotRef.current;
+    const chatHistorySnapshot = latestChatHistoryRef.current;
+    saveLastActiveTab(AI_CHAT_TAB_ID);
+
+    try {
+      await Promise.all([
+        invoke('save_settings', {
+          data: JSON.stringify({
+            useSystemProxy: settingsSnapshot?.useSystemProxy ?? useSystemProxy,
+            speechRate: settingsSnapshot?.speechRate ?? speechRate,
+            shortcutCommands: settingsSnapshot?.shortcutCommands ?? shortcutCommands,
+            shortcutCommandSettings: settingsSnapshot?.shortcutCommandSettings ?? commandSettings,
+            aiProvider: settingsSnapshot?.aiProvider ?? aiProvider,
+          }),
+        }),
+        chatHistorySnapshot
+          ? invoke('save_chat_history_jsonl', { data: JSON.stringify(chatHistorySnapshot) })
+          : Promise.resolve(),
+      ]);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      window.location.reload();
+    }
+  };
+
+  const handleUpdatePlatform = (platformId: string, partial: Partial<Platform>) => {
+    const nextName = typeof partial.name === 'string' ? partial.name.trim() : '';
+    const nextUrl = typeof partial.url === 'string' ? normalizeUrl(partial.url) : '';
+
+    setPlatforms(prev => prev.map(platform => (
+      platform.id === platformId
+        ? {
+          ...platform,
+          ...(nextName ? { name: nextName } : {}),
+          ...(nextUrl ? { url: nextUrl } : {}),
+        }
+        : platform
+    )));
+
+    if (nextUrl) {
+      setBrowserNavStates(prev => {
+        const currentState = prev[platformId];
+        if (!currentState) return prev;
+        return {
+          ...prev,
+          [platformId]: {
+            ...currentState,
+            currentUrl: nextUrl,
+            homeUrl: nextUrl,
+            isLoading: false,
+          },
+        };
+      });
+    }
+  };
+
   const handleQuickAdd = () => {
     if (!quickUrl.trim()) return;
     const finalUrl = normalizeUrl(quickUrl);
@@ -1163,11 +1262,7 @@ function App() {
   const handleReloadPlatform = (e: MouseEvent, id: string) => {
     e.stopPropagation();
     if (id === AI_CHAT_TAB_ID) {
-      if (!activeChatSessionId) {
-        handleCreateChatSession();
-      } else {
-        resetActiveSession();
-      }
+      void handleReloadAiPage();
       return;
     }
     const platform = tempTabs.find(p => p.id === id) || platforms.find(p => p.id === id);
@@ -1350,8 +1445,8 @@ function App() {
                 <button
                   className="tab-refresh-btn tab-refresh-left"
                   onClick={(e) => handleReloadPlatform(e, AI_CHAT_TAB.id)}
-                  title="清空对话"
-                  aria-label="清空对话"
+                  title="重新载入页面"
+                  aria-label="重新载入页面"
                 >
                   <RefreshCw size={14} />
                 </button>
@@ -1555,8 +1650,8 @@ function App() {
             <button
               className="browser-toolbar-btn"
               type="button"
-              aria-label={isActiveAiChat ? '清空当前会话' : '刷新当前标签'}
-              title={isActiveAiChat ? '清空当前会话' : '刷新当前标签'}
+              aria-label={isActiveAiChat ? '重新载入页面' : '刷新当前标签'}
+              title={isActiveAiChat ? '重新载入页面' : '刷新当前标签'}
               onClick={(e) => handleReloadPlatform(e, activeTab)}
               disabled={!activeTab}
             >
@@ -2007,6 +2102,7 @@ function App() {
         }}
         onMovePlatform={handleMovePlatform}
         onRemovePlatform={handleRemovePlatform}
+        onUpdatePlatform={handleUpdatePlatform}
         renderPlatformIcon={platform => <PlatformIcon platformId={platform.id} platformName={platform.name} url={platform.url} size={16} />}
         showAddForm={showAddForm}
         onShowAddForm={() => setShowAddForm(true)}

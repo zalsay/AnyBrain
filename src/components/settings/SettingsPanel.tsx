@@ -35,6 +35,7 @@ interface SettingsPanelProps {
   onRestorePlatform: (platformId: string) => void;
   onMovePlatform: (index: number, direction: 'up' | 'down') => void;
   onRemovePlatform: (platformId: string) => void;
+  onUpdatePlatform: (platformId: string, partial: Partial<PlatformItem>) => void;
   renderPlatformIcon: (platform: PlatformItem) => React.ReactNode;
   showAddForm: boolean;
   onShowAddForm: () => void;
@@ -143,6 +144,7 @@ function SettingsPanel(props: SettingsPanelProps) {
               onRestorePlatform={props.onRestorePlatform}
               onMovePlatform={props.onMovePlatform}
               onRemovePlatform={props.onRemovePlatform}
+              onUpdatePlatform={props.onUpdatePlatform}
               renderPlatformIcon={props.renderPlatformIcon}
               showAddForm={props.showAddForm}
               onShowAddForm={props.onShowAddForm}
