@@ -1232,6 +1232,7 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  contain: layout paint;
 }
 
 .ai-workbuddy-message.user {
@@ -1365,6 +1366,7 @@ textarea {
     0 0 24px rgba(0, 227, 138, 0.05);
   backdrop-filter: blur(30px) saturate(140%);
   -webkit-backdrop-filter: blur(30px) saturate(140%);
+  contain: paint;
 }
 
 .ai-workbuddy-message.assistant .ai-workbuddy-bubble {
@@ -1395,6 +1397,28 @@ textarea {
 .ai-workbuddy-message.is-error .ai-workbuddy-bubble {
   border-color: rgba(238, 125, 119, 0.28);
   background: rgba(127, 41, 39, 0.22);
+}
+
+.ai-workbuddy-message.is-streaming .ai-workbuddy-bubble,
+.ai-workbuddy-message.is-heavy-render .ai-workbuddy-bubble {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 0 0 1px rgba(0, 227, 138, 0.03),
+    0 10px 24px rgba(0, 0, 0, 0.18);
+}
+
+.ai-workbuddy-message.is-streaming .ai-workbuddy-bubble {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02)),
+    linear-gradient(145deg, rgba(18, 29, 25, 0.96), rgba(25, 27, 27, 0.98) 42%, rgba(18, 19, 19, 0.98));
+}
+
+.ai-workbuddy-message.is-heavy-render .ai-workbuddy-bubble {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
+    linear-gradient(145deg, rgba(20, 27, 24, 0.98), rgba(28, 30, 30, 0.99) 42%, rgba(18, 19, 19, 0.98));
 }
 
 .ai-workbuddy-content {

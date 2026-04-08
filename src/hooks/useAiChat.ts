@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { startTransition, useEffect, useMemo, useRef, useState } from 'react';
 import { CHAT_WELCOME_MESSAGE } from '../app/constants';
 import {
   buildModelContextMessages,
@@ -42,6 +42,61 @@ interface RunModelRequestOptions {
 
 const MODEL_REQUEST_MAX_RETRIES = 3;
 const MODEL_REQUEST_RETRY_BASE_DELAY_MS = 500;
+const STREAM_RENDER_INTERVAL_MS = 72;
+const STREAM_RENDER_MIN_CHARS = 2;
+const STREAM_RENDER_MAX_CHARS = 6;
+const STREAM_RENDER_PUNCTUATION_DELAY_MS = 110;
+const STREAM_RENDER_LINEBREAK_DELAY_MS = 160;
+
+interface AssistantStreamBufferState {
+  sessionId: string;
+  assistantId: string;
+  displayedContent: string;
+  targetContent: string;
+  timerId: number | null;
+  drainResolvers: Array<() => void>;
+}
+
+function isStreamPausePunctuation(char: string) {
+  return /[，。！？；：,.!?;:、】【（）()]/.test(char);
+}
+
+function getNextStreamRenderSlice(remainingContent: string) {
+  if (!remainingContent) return '';
+
+  const limit = Math.min(STREAM_RENDER_MAX_CHARS, remainingContent.length);
+  let endIndex = 0;
+
+  while (endIndex < limit) {
+    endIndex += 1;
+    const char = remainingContent[endIndex - 1];
+
+    if (char === '\n') {
+      break;
+    }
+
+    if (endIndex >= STREAM_RENDER_MIN_CHARS && isStreamPausePunctuation(char)) {
+      break;
+    }
+
+    if (endIndex >= STREAM_RENDER_MIN_CHARS && /\s/.test(char)) {
+      break;
+    }
+  }
+
+  return remainingContent.slice(0, endIndex);
+}
+
+function getStreamRenderDelay(renderedSlice: string) {
+  if (!renderedSlice) return STREAM_RENDER_INTERVAL_MS;
+  if (renderedSlice.includes('\n')) {
+    return STREAM_RENDER_INTERVAL_MS + STREAM_RENDER_LINEBREAK_DELAY_MS;
+  }
+  if (isStreamPausePunctuation(renderedSlice[renderedSlice.length - 1] || '')) {
+    return STREAM_RENDER_INTERVAL_MS + STREAM_RENDER_PUNCTUATION_DELAY_MS;
+  }
+  return STREAM_RENDER_INTERVAL_MS;
+}
 
 function joinBaseUrl(baseUrl: string) {
   const trimmed = baseUrl.trim();
@@ -136,6 +191,12 @@ function createPersistedHistorySnapshot(
   });
 }
 
+function hasAnyStreamingMessages(chatSessions: ChatSession[]) {
+  return chatSessions.some(session =>
+    session.messages.some(message => message.status === 'streaming')
+  );
+}
+
 export function useAiChat({
   aiProvider,
   speechRate,
@@ -151,6 +212,7 @@ export function useAiChat({
   const [chatCopyState, setChatCopyState] = useState<Record<string, 'success' | 'error'>>({});
   const [chatSpeakingId, setChatSpeakingId] = useState<string | null>(null);
   const hasHydratedPersistedHistoryRef = useRef(false);
+  const assistantStreamBuffersRef = useRef<Map<string, AssistantStreamBufferState>>(new Map());
 
   const activeChatSession = useMemo(
     () => chatSessions.find(session => session.id === activeChatSessionId) ?? null,
@@ -268,27 +330,133 @@ export function useAiChat({
   };
 
   const applyAssistantDelta = (sessionId: string, assistantId: string, reply: string) => {
-    updateChatSession(sessionId, session => ({
-      ...session,
-      messages: session.messages.map(message => (
-        message.id === assistantId
-          ? { ...message, content: reply, status: 'streaming' }
-          : message
-      )),
-      updatedAt: Date.now(),
-    }));
+    startTransition(() => {
+      updateChatSession(sessionId, session => ({
+        ...session,
+        messages: session.messages.map(message => (
+          message.id === assistantId
+            ? { ...message, content: reply, status: 'streaming' }
+            : message
+        )),
+        updatedAt: Date.now(),
+      }));
+    });
+  };
+
+  const clearAssistantStreamBuffer = (assistantId: string) => {
+    const buffer = assistantStreamBuffersRef.current.get(assistantId);
+    if (!buffer) return;
+
+    if (buffer.timerId) {
+      window.clearTimeout(buffer.timerId);
+    }
+
+    const resolvers = [...buffer.drainResolvers];
+    buffer.drainResolvers = [];
+    assistantStreamBuffersRef.current.delete(assistantId);
+
+    for (const resolve of resolvers) {
+      resolve();
+    }
+  };
+
+  const resolveAssistantStreamBuffer = (assistantId: string) => {
+    const buffer = assistantStreamBuffersRef.current.get(assistantId);
+    if (!buffer) return;
+
+    const resolvers = [...buffer.drainResolvers];
+    buffer.drainResolvers = [];
+    for (const resolve of resolvers) {
+      resolve();
+    }
+  };
+
+  const scheduleAssistantStreamFlush = (assistantId: string) => {
+    const buffer = assistantStreamBuffersRef.current.get(assistantId);
+    if (!buffer || buffer.timerId) return;
+
+    const flush = () => {
+      const currentBuffer = assistantStreamBuffersRef.current.get(assistantId);
+      if (!currentBuffer) return;
+
+      const pendingLength = currentBuffer.targetContent.length - currentBuffer.displayedContent.length;
+      if (pendingLength <= 0) {
+        currentBuffer.timerId = null;
+        resolveAssistantStreamBuffer(assistantId);
+        return;
+      }
+
+      const remainingContent = currentBuffer.targetContent.slice(currentBuffer.displayedContent.length);
+      const nextSlice = getNextStreamRenderSlice(remainingContent);
+      currentBuffer.displayedContent += nextSlice;
+      applyAssistantDelta(currentBuffer.sessionId, currentBuffer.assistantId, currentBuffer.displayedContent);
+
+      if (currentBuffer.displayedContent.length >= currentBuffer.targetContent.length) {
+        currentBuffer.timerId = null;
+        resolveAssistantStreamBuffer(assistantId);
+        return;
+      }
+
+      currentBuffer.timerId = window.setTimeout(flush, getStreamRenderDelay(nextSlice));
+    };
+
+    buffer.timerId = window.setTimeout(flush, STREAM_RENDER_INTERVAL_MS);
+  };
+
+  const queueAssistantDelta = (sessionId: string, assistantId: string, reply: string) => {
+    const existingBuffer = assistantStreamBuffersRef.current.get(assistantId);
+    if (existingBuffer) {
+      existingBuffer.sessionId = sessionId;
+      existingBuffer.targetContent = reply;
+      scheduleAssistantStreamFlush(assistantId);
+      return;
+    }
+
+    assistantStreamBuffersRef.current.set(assistantId, {
+      sessionId,
+      assistantId,
+      displayedContent: '',
+      targetContent: reply,
+      timerId: null,
+      drainResolvers: [],
+    });
+    scheduleAssistantStreamFlush(assistantId);
+  };
+
+  const drainAssistantStreamBuffer = (assistantId: string, finalReply: string) => {
+    const buffer = assistantStreamBuffersRef.current.get(assistantId);
+    if (!buffer) {
+      return Promise.resolve();
+    }
+
+    buffer.targetContent = finalReply;
+    if (buffer.displayedContent.length >= buffer.targetContent.length) {
+      clearAssistantStreamBuffer(assistantId);
+      return Promise.resolve();
+    }
+
+    return new Promise<void>(resolve => {
+      buffer.drainResolvers.push(() => {
+        clearAssistantStreamBuffer(assistantId);
+        resolve();
+      });
+      scheduleAssistantStreamFlush(assistantId);
+    });
   };
 
   const resetAssistantPlaceholder = (sessionId: string, assistantId: string, content = '正在思考中…') => {
-    updateChatSession(sessionId, session => ({
-      ...session,
-      messages: session.messages.map(message => (
-        message.id === assistantId
-          ? { ...message, content, status: 'streaming' }
-          : message
-      )),
-      updatedAt: Date.now(),
-    }));
+    clearAssistantStreamBuffer(assistantId);
+    startTransition(() => {
+      updateChatSession(sessionId, session => ({
+        ...session,
+        messages: session.messages.map(message => (
+          message.id === assistantId
+            ? { ...message, content, status: 'streaming' }
+            : message
+        )),
+        updatedAt: Date.now(),
+      }));
+    });
   };
 
   const consumeResponseStream = async (
@@ -310,7 +478,7 @@ export function useAiChat({
           const delta = extractStreamingDelta(eventPayload);
           if (delta) {
             currentReply += delta;
-            applyAssistantDelta(sessionId, assistantId, currentReply);
+            queueAssistantDelta(sessionId, assistantId, currentReply);
           }
           payload = eventPayload;
         } catch (parseError) {
@@ -687,28 +855,34 @@ export function useAiChat({
         throw new Error(lastError || '请求失败，请检查模型接口配置。');
       }
 
-      updateChatSession(sessionId, session => ({
-        ...session,
-        messages: session.messages.map(message => (
-          message.id === assistantId
-            ? { ...message, content: reply, status: undefined }
-            : message
-        )),
-        updatedAt: Date.now(),
-      }));
+      await drainAssistantStreamBuffer(assistantId, reply);
+      startTransition(() => {
+        updateChatSession(sessionId, session => ({
+          ...session,
+          messages: session.messages.map(message => (
+            message.id === assistantId
+              ? { ...message, content: reply, status: undefined }
+              : message
+          )),
+          updatedAt: Date.now(),
+        }));
+      });
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      clearAssistantStreamBuffer(assistantId);
       setChatError(message);
-      updateChatSession(sessionId, session => ({
-        ...session,
-        messages: session.messages.map(item => (
-          item.id === assistantId
-            ? { ...item, content: `请求失败：${message}`, status: 'error' }
-            : item
-        )),
-        updatedAt: Date.now(),
-      }));
+      startTransition(() => {
+        updateChatSession(sessionId, session => ({
+          ...session,
+          messages: session.messages.map(item => (
+            item.id === assistantId
+              ? { ...item, content: `请求失败：${message}`, status: 'error' }
+              : item
+          )),
+          updatedAt: Date.now(),
+        }));
+      });
       return false;
     }
   };
@@ -881,6 +1055,7 @@ export function useAiChat({
 
   useEffect(() => {
     if (!historyLoaded || !hasHydratedPersistedHistoryRef.current || !onHistoryChange) return;
+    if (hasAnyStreamingMessages(chatSessions)) return;
     const nextHistory = createPersistedHistorySnapshot(chatSessions, activeChatSessionId);
     if (!nextHistory) return;
 
@@ -889,6 +1064,9 @@ export function useAiChat({
 
   useEffect(() => {
     return () => {
+      for (const assistantId of assistantStreamBuffersRef.current.keys()) {
+        clearAssistantStreamBuffer(assistantId);
+      }
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }

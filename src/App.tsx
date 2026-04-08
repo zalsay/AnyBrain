@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -24,6 +24,7 @@ import type {
   AiModelConfig,
   AiProviderSettings,
   BrowserNavigationState,
+  ChatMessage,
   CommandExecMode,
   ExecMode,
   Platform,
@@ -54,6 +55,7 @@ const TEXT_ATTACHMENT_EXTENSIONS = new Set([
 
 const MAX_ATTACHMENT_TEXT_BYTES = 200_000;
 const MAX_ATTACHMENT_TEXT_CHARS = 20_000;
+const HEAVY_RENDER_MESSAGE_LENGTH = 4000;
 
 function formatAttachmentSize(size: number) {
   if (size < 1024) return `${size} B`;
@@ -200,6 +202,141 @@ function saveLastActiveTab(tabId: string) {
   }
 }
 
+interface ChatMessageItemProps {
+  message: ChatMessage;
+  isLastUserMessage: boolean;
+  chatSending: boolean;
+  chatCopyState?: 'success' | 'error';
+  chatSpeaking: boolean;
+  codeBlockCopyState: Record<string, 'success' | 'error'>;
+  onRetry: (messageId: string) => void;
+  onCopyMessage: (messageId: string, content: string) => void;
+  onSpeakMessage: (messageId: string, content: string) => void;
+  onCopyCodeBlock: (blockId: string, content: string) => void;
+}
+
+const ChatMessageItem = memo(function ChatMessageItem({
+  message,
+  isLastUserMessage,
+  chatSending,
+  chatCopyState,
+  chatSpeaking,
+  codeBlockCopyState,
+  onRetry,
+  onCopyMessage,
+  onSpeakMessage,
+  onCopyCodeBlock,
+}: ChatMessageItemProps) {
+  const renderedContent = useMemo(() => {
+    if (message.status === 'streaming') {
+      return (
+        <div key={`${message.id}-streaming-text`} className="ai-workbuddy-text-block">
+          {message.content}
+        </div>
+      );
+    }
+
+    const blocks = parseMessageContentBlocks(message.content);
+    return blocks.map((block, index) => {
+      if (block.type === 'code') {
+        const blockId = `${message.id}-code-${index}`;
+        const copyState = codeBlockCopyState[blockId];
+        const copyLabel = copyState === 'success' ? '已复制' : copyState === 'error' ? '复制失败' : '复制';
+
+        return (
+          <div key={blockId} className="ai-workbuddy-code-block">
+            <div className="ai-workbuddy-code-header">
+              <span className="ai-workbuddy-code-language">{block.language || 'code'}</span>
+              <button
+                className={`ai-workbuddy-code-copy-btn ${copyState ? `is-${copyState}` : ''}`}
+                type="button"
+                onClick={() => onCopyCodeBlock(blockId, block.content)}
+                title={copyLabel}
+                aria-label={copyLabel}
+              >
+                <Copy size={12} />
+                <span>{copyLabel}</span>
+              </button>
+            </div>
+            <pre className="ai-workbuddy-code-pre">
+              <code>{block.content}</code>
+            </pre>
+          </div>
+        );
+      }
+
+      return (
+        <div key={`${message.id}-text-${index}`} className="ai-workbuddy-text-block">
+          {renderInlineCode(block.content)}
+        </div>
+      );
+    });
+  }, [message.id, message.content, message.status, codeBlockCopyState, onCopyCodeBlock]);
+
+  return (
+    <article className={`ai-workbuddy-message ${message.role} ${message.status === 'error' ? 'is-error' : ''} ${message.status === 'streaming' ? 'is-streaming' : ''} ${message.content.length >= HEAVY_RENDER_MESSAGE_LENGTH ? 'is-heavy-render' : ''}`}>
+      <div className="ai-workbuddy-message-meta">
+        <div className={`ai-workbuddy-avatar ${message.role === 'assistant' && message.status === 'streaming' ? 'is-streaming' : ''}`}>
+          {message.role === 'assistant' ? <Bot size={16} /> : <span>你</span>}
+        </div>
+        <div className="ai-workbuddy-meta-text">
+          <span className="ai-workbuddy-role">{message.role === 'assistant' ? 'AnyBrain' : '你'}</span>
+          <span className="ai-workbuddy-time">{message.status === 'streaming' ? '思考中' : message.status === 'error' ? '请求失败' : '刚刚'}</span>
+        </div>
+      </div>
+
+      <div className="ai-workbuddy-bubble-stack">
+        <div className="ai-workbuddy-bubble-shell">
+          <div className="ai-workbuddy-bubble-glow" />
+          <div className="ai-workbuddy-bubble">
+            <div className="ai-workbuddy-content">{renderedContent}</div>
+          </div>
+        </div>
+
+        <div className="ai-workbuddy-actions">
+          {message.role === 'user' && isLastUserMessage && (
+            <button
+              className="ai-workbuddy-action-btn"
+              onClick={() => onRetry(message.id)}
+              title="重试调用模型"
+              aria-label="重试调用模型"
+              disabled={chatSending}
+            >
+              <RefreshCw size={12} />
+              <span>重试</span>
+            </button>
+          )}
+          <button
+            className={`ai-workbuddy-action-btn ${chatCopyState ? `is-${chatCopyState}` : ''}`}
+            onClick={() => onCopyMessage(message.id, message.content)}
+            title={chatCopyState === 'success' ? '已复制' : chatCopyState === 'error' ? '复制失败' : '复制消息'}
+            aria-label={chatCopyState === 'success' ? '已复制' : chatCopyState === 'error' ? '复制失败' : '复制消息'}
+          >
+            <Copy size={12} />
+            <span>{chatCopyState === 'success' ? '已复制' : '复制'}</span>
+          </button>
+          <button
+            className={`ai-workbuddy-action-btn ${chatSpeaking ? 'is-speaking' : ''}`}
+            onClick={() => onSpeakMessage(message.id, message.content)}
+            title={chatSpeaking ? '停止朗读' : '朗读消息'}
+            aria-label={chatSpeaking ? '停止朗读' : '朗读消息'}
+          >
+            {chatSpeaking ? <VolumeX size={12} /> : <Volume2 size={12} />}
+            <span>{chatSpeaking ? '停止' : '朗读'}</span>
+          </button>
+        </div>
+      </div>
+    </article>
+  );
+}, (prev, next) => (
+  prev.message === next.message
+  && prev.isLastUserMessage === next.isLastUserMessage
+  && prev.chatSending === next.chatSending
+  && prev.chatCopyState === next.chatCopyState
+  && prev.chatSpeaking === next.chatSpeaking
+  && prev.codeBlockCopyState === next.codeBlockCopyState
+));
+
 function App() {
   const [platforms, setPlatforms] = useState<Platform[]>([]);
   const [tempTabs, setTempTabs] = useState<Platform[]>([]);
@@ -259,6 +396,8 @@ function App() {
   const [editingChatSessionId, setEditingChatSessionId] = useState('');
   const [editingChatSessionTitle, setEditingChatSessionTitle] = useState('');
   const [pendingDeleteChatSession, setPendingDeleteChatSession] = useState<{ id: string; title: string } | null>(null);
+  const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const shouldAutoScrollChatRef = useRef(true);
   const {
     chatSessions,
     activeChatSessionId,
@@ -348,6 +487,26 @@ function App() {
   );
   const isRestoringChatHistory = !chatHistoryLoaded;
   const hasActiveChatSession = Boolean(activeChatSessionId);
+  const activeChatHasStreamingMessage = useMemo(
+    () => activeChatMessages.some(message => message.status === 'streaming'),
+    [activeChatMessages]
+  );
+
+  const isChatScrollNearBottom = () => {
+    const container = chatScrollContainerRef.current;
+    if (!container) return true;
+    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    return distanceToBottom <= 32;
+  };
+
+  const scrollChatToBottom = (behavior: ScrollBehavior = 'auto') => {
+    const container = chatScrollContainerRef.current;
+    if (!container) return;
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior,
+    });
+  };
 
   useEffect(() => {
     if (!isEditingToolbarAddress) {
@@ -361,6 +520,15 @@ function App() {
       setEditingChatSessionTitle('');
     }
   }, [chatSessions, editingChatSessionId]);
+
+  useEffect(() => {
+    shouldAutoScrollChatRef.current = true;
+    if (isActiveAiChat && !showSettings) {
+      window.requestAnimationFrame(() => {
+        scrollChatToBottom('auto');
+      });
+    }
+  }, [activeChatSessionId, isActiveAiChat, showSettings]);
 
   const handleCreateChatSession = () => {
     setEditingChatSessionId('');
@@ -442,6 +610,7 @@ function App() {
 
   const handleSendComposer = async () => {
     if (isRestoringChatHistory) return;
+    shouldAutoScrollChatRef.current = true;
 
     const sent = await sendChat({
       reasoningEffort: thinkingDepth,
@@ -454,6 +623,7 @@ function App() {
   };
 
   const handleRetryMessage = async (messageId: string) => {
+    shouldAutoScrollChatRef.current = true;
     await retryMessage(messageId, thinkingDepth);
   };
 
@@ -472,45 +642,6 @@ function App() {
         });
       }, 1600);
     }
-  };
-
-  const renderMessageContent = (messageId: string, content: string) => {
-    const blocks = parseMessageContentBlocks(content);
-
-    return blocks.map((block, index) => {
-      if (block.type === 'code') {
-        const blockId = `${messageId}-code-${index}`;
-        const copyState = codeBlockCopyState[blockId];
-        const copyLabel = copyState === 'success' ? '已复制' : copyState === 'error' ? '复制失败' : '复制';
-
-        return (
-          <div key={blockId} className="ai-workbuddy-code-block">
-            <div className="ai-workbuddy-code-header">
-              <span className="ai-workbuddy-code-language">{block.language || 'code'}</span>
-              <button
-                className={`ai-workbuddy-code-copy-btn ${copyState ? `is-${copyState}` : ''}`}
-                type="button"
-                onClick={() => void copyCodeBlock(blockId, block.content)}
-                title={copyLabel}
-                aria-label={copyLabel}
-              >
-                <Copy size={12} />
-                <span>{copyLabel}</span>
-              </button>
-            </div>
-            <pre className="ai-workbuddy-code-pre">
-              <code>{block.content}</code>
-            </pre>
-          </div>
-        );
-      }
-
-      return (
-        <div key={`${messageId}-text-${index}`} className="ai-workbuddy-text-block">
-          {renderInlineCode(block.content)}
-        </div>
-      );
-    });
   };
 
   useEffect(() => {
@@ -697,9 +828,10 @@ function App() {
 
   useEffect(() => {
     if (isActiveAiChat && !showSettings) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      if (!shouldAutoScrollChatRef.current) return;
+      scrollChatToBottom(activeChatHasStreamingMessage ? 'auto' : 'smooth');
     }
-  }, [activeChatMessages, isActiveAiChat, showSettings]);
+  }, [activeChatMessages, activeChatHasStreamingMessage, isActiveAiChat, showSettings]);
 
   const saveSettings = (next: Record<string, unknown>) => {
     invoke('save_settings', { data: JSON.stringify(next) }).catch(console.error);
@@ -750,11 +882,12 @@ function App() {
 
   function handleChatHistoryChange(history: PersistedChatHistory) {
     latestChatHistoryRef.current = history;
-    setPersistedChatHistory(history);
-
-    if (!hasStreamingMessages(history)) {
-      persistChatHistoryJsonl(history);
+    if (hasStreamingMessages(history)) {
+      return;
     }
+
+    setPersistedChatHistory(history);
+    persistChatHistoryJsonl(history);
   }
 
   const flushPersistedSettings = (overrides: Partial<{
@@ -1875,7 +2008,18 @@ function App() {
           </aside>
 
           <section className="ai-workbuddy-main">
-            <div className="ai-workbuddy-scroll">
+            <div
+              ref={chatScrollContainerRef}
+              className="ai-workbuddy-scroll"
+              onWheel={() => {
+                if (activeChatHasStreamingMessage) {
+                  shouldAutoScrollChatRef.current = false;
+                }
+              }}
+              onScroll={() => {
+                shouldAutoScrollChatRef.current = isChatScrollNearBottom();
+              }}
+            >
               <div className="ai-workbuddy-stream">
                 {isRestoringChatHistory ? (
                   <div className="ai-workbuddy-empty-state">
@@ -1884,61 +2028,27 @@ function App() {
                     <div className="ai-workbuddy-empty-meta">等待本地 JSONL 历史加载完成…</div>
                   </div>
                 ) : hasActiveChatSession ? (
-                  activeChatMessages.map(message => (
-                    <article key={message.id} className={`ai-workbuddy-message ${message.role} ${message.status === 'error' ? 'is-error' : ''}`}>
-                      <div className="ai-workbuddy-message-meta">
-                        <div className={`ai-workbuddy-avatar ${message.role === 'assistant' && message.status === 'streaming' ? 'is-streaming' : ''}`}>
-                          {message.role === 'assistant' ? <Bot size={16} /> : <span>你</span>}
-                        </div>
-                        <div className="ai-workbuddy-meta-text">
-                          <span className="ai-workbuddy-role">{message.role === 'assistant' ? 'AnyBrain' : '你'}</span>
-                          <span className="ai-workbuddy-time">{message.status === 'streaming' ? '思考中' : message.status === 'error' ? '请求失败' : '刚刚'}</span>
-                        </div>
-                      </div>
-
-                      <div className="ai-workbuddy-bubble-stack">
-                        <div className="ai-workbuddy-bubble-shell">
-                          <div className="ai-workbuddy-bubble-glow" />
-                          <div className="ai-workbuddy-bubble">
-                            <div className="ai-workbuddy-content">{renderMessageContent(message.id, message.content)}</div>
-                          </div>
-                        </div>
-
-                        <div className="ai-workbuddy-actions">
-                          {message.role === 'user' && message.id === lastUserMessageId && (
-                            <button
-                              className="ai-workbuddy-action-btn"
-                              onClick={() => void handleRetryMessage(message.id)}
-                              title="重试调用模型"
-                              aria-label="重试调用模型"
-                              disabled={chatSending}
-                            >
-                              <RefreshCw size={12} />
-                              <span>重试</span>
-                            </button>
-                          )}
-                          <button
-                            className={`ai-workbuddy-action-btn ${chatCopyState[message.id] ? `is-${chatCopyState[message.id]}` : ''}`}
-                            onClick={() => void copyMessage(message.id, message.content)}
-                            title={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
-                            aria-label={chatCopyState[message.id] === 'success' ? '已复制' : chatCopyState[message.id] === 'error' ? '复制失败' : '复制消息'}
-                          >
-                            <Copy size={12} />
-                            <span>{chatCopyState[message.id] === 'success' ? '已复制' : '复制'}</span>
-                          </button>
-                          <button
-                            className={`ai-workbuddy-action-btn ${chatSpeakingId === message.id ? 'is-speaking' : ''}`}
-                            onClick={() => speakMessage(message.id, message.content)}
-                            title={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
-                            aria-label={chatSpeakingId === message.id ? '停止朗读' : '朗读消息'}
-                          >
-                            {chatSpeakingId === message.id ? <VolumeX size={12} /> : <Volume2 size={12} />}
-                            <span>{chatSpeakingId === message.id ? '停止' : '朗读'}</span>
-                          </button>
-                        </div>
-                      </div>
-                    </article>
-                  ))
+                  activeChatMessages.map(message => {
+                    return (
+                    <ChatMessageItem
+                      key={message.id}
+                      message={message}
+                      isLastUserMessage={message.role === 'user' && message.id === lastUserMessageId}
+                      chatSending={chatSending}
+                      chatCopyState={chatCopyState[message.id]}
+                      chatSpeaking={chatSpeakingId === message.id}
+                      codeBlockCopyState={codeBlockCopyState}
+                      onRetry={handleRetryMessage}
+                      onCopyMessage={(messageId, content) => {
+                        void copyMessage(messageId, content);
+                      }}
+                      onSpeakMessage={speakMessage}
+                      onCopyCodeBlock={(blockId, content) => {
+                        void copyCodeBlock(blockId, content);
+                      }}
+                    />
+                  );
+                  })
                 ) : (
                   <div className="ai-workbuddy-empty-state">
                     <div className="ai-workbuddy-empty-icon"><Sparkles size={18} /></div>
